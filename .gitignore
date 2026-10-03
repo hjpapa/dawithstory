@@ -5,3 +5,8 @@ node_modules/
 
 .vercel
 .env*
+.next/
+out/
+*.tsbuildinfo
+.test-artifacts/
+!.env.example

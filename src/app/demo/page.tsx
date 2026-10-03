@@ -1,0 +1,165 @@
+import { RoomView } from "@/components/room";
+import type { Snapshot } from "@/lib/domain";
+const now = "2026-10-03T09:00:00+09:00";
+const demo: Snapshot = {
+  room: {
+    id: "demo",
+    owner_id: "host",
+    title: "우리 동네를 더 행복하게 만드는 방법",
+    topic:
+      "작은 실천으로 우리 동네를 바꿀 수 있을까요? 자유롭게 생각을 나눠봐요.",
+    kind: "discussion",
+    code: "TOGETHER",
+    state: "active",
+    ai_mode: "balanced",
+    created_at: now,
+    ended_at: null,
+    host_seen_at: now,
+    ai_error: null,
+    revision: 0,
+    is_demo: true,
+  },
+  isHost: true,
+  me: null,
+  members: [
+    {
+      id: "a",
+      user_id: "a",
+      room_id: "demo",
+      nickname: "구름토끼",
+      avatar: "🐰",
+      state: "approved",
+      muted: false,
+      can_ask_ai: false,
+      points: 1,
+    },
+    {
+      id: "b",
+      user_id: "b",
+      room_id: "demo",
+      nickname: "초코곰",
+      avatar: "🐻",
+      state: "approved",
+      muted: false,
+      can_ask_ai: true,
+      points: 1,
+    },
+    {
+      id: "c",
+      user_id: "c",
+      room_id: "demo",
+      nickname: "햇살고양이",
+      avatar: "🐱",
+      state: "approved",
+      muted: false,
+      can_ask_ai: false,
+      points: 0,
+    },
+  ],
+  messages: [
+    {
+      id: 1,
+      room_id: "demo",
+      role: "host",
+      member_id: null,
+      nickname: "진행자",
+      avatar: "🌷",
+      content:
+        "반가워요! 오늘은 우리 동네를 더 행복하게 만드는 작은 실천에 대해 이야기해 볼까요? 🌱",
+      visibility: "visible",
+      created_at: now,
+    },
+    {
+      id: 2,
+      room_id: "demo",
+      role: "member",
+      member_id: "a",
+      nickname: "구름토끼",
+      avatar: "🐰",
+      content:
+        "저는 동네 공원에 작은 꽃밭을 만들면 좋겠어요. 지나가는 사람들이 꽃을 보면 기분이 좋아질 것 같아요!",
+      visibility: "visible",
+      created_at: now,
+    },
+    {
+      id: 3,
+      room_id: "demo",
+      role: "member",
+      member_id: "b",
+      nickname: "초코곰",
+      avatar: "🐻",
+      content:
+        "좋은 생각이에요! 꽃을 심는 것도 좋지만, 먼저 공원에 있는 쓰레기를 함께 치우면 어떨까요?",
+      visibility: "visible",
+      created_at: now,
+    },
+    {
+      id: 4,
+      room_id: "demo",
+      role: "member",
+      member_id: "c",
+      nickname: "햇살고양이",
+      avatar: "🐱",
+      content:
+        "둘 다 할 수 있지 않을까요? 쓰레기를 줍고, 깨끗해진 자리에 꽃을 심는 거예요. 이름도 ‘우리 동네 꽃요일’로 해요!",
+      visibility: "visible",
+      created_at: now,
+    },
+    {
+      id: 5,
+      room_id: "demo",
+      role: "ai",
+      member_id: null,
+      nickname: "이야기별",
+      avatar: "⭐",
+      content:
+        "꽃밭 만들기와 공원 청소가 만나 멋진 아이디어가 되었네요! 함께 참여할 사람들은 어떻게 모으면 좋을까요?",
+      visibility: "visible",
+      created_at: now,
+    },
+  ],
+  summary: {
+    created_at: now,
+    content: {
+      overview:
+        "공원을 깨끗하게 가꾸고 꽃을 심어, 함께 즐기는 동네를 만들자는 생각이 모였어요.",
+      opinions: [
+        { text: "공원에 작은 꽃밭을 만들어요.", message_ids: [2] },
+        { text: "공원 청소를 먼저 함께 해요.", message_ids: [3] },
+        { text: "두 활동을 묶어 ‘꽃요일’을 만들어요.", message_ids: [4] },
+      ],
+      agreements: [
+        {
+          text: "모두가 기분 좋게 이용하는 공원을 원해요.",
+          message_ids: [2, 3, 4],
+        },
+      ],
+      differences: [
+        {
+          text: "꽃 심기와 청소 중 먼저 할 활동이 달랐어요.",
+          message_ids: [2, 3],
+        },
+      ],
+      questions: ["함께할 이웃은 어떻게 모을까요?"],
+      reply: "",
+    },
+  },
+  praise: [
+    {
+      id: "p",
+      member_id: "b",
+      message_id: 3,
+      category: "listening",
+      reason: "친구의 생각을 존중하며 새로운 의견을 보탰어요.",
+      status: "awarded",
+      created_at: now,
+    },
+  ],
+  jobs: [],
+  reports: [],
+  aiEnabled: true,
+  myPoints: 0,
+};
+export default function Demo() {
+  return <RoomView roomId="demo" initial={demo} demo />;
+}

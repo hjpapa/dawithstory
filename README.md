@@ -1,0 +1,99 @@
+# 다함께 이야기
+
+귀여운 별 마스코트 **이야기별**과 함께하는 전 연령 토의·토론·일상 이야기 앱입니다.
+
+운영 주소: [dawithstory.vercel.app](https://dawithstory.vercel.app/). GitHub `hjpapa/dawithstory`의 `main` 브랜치에 연결합니다. 실제 이용자 AI는 데이터 처리 조건 확인 전까지 꺼진 상태로 유지합니다.
+
+## 실행
+
+```sh
+npm ci
+npm run dev
+npm run typecheck
+npm test
+npm run build
+```
+
+환경 변수는 `.env.example`을 참고합니다. 비밀 값은 `.env.local`에만 저장하며 Git에 포함하지 않습니다.
+
+## 화면
+
+- `/`: 코드·별명·아바타로 참여 신청
+- `/login`: 진행자 가입, 로그인, 비밀번호 재설정 메일
+- `/dashboard`: 가입 승인 상태, 대화방 생성·기록
+- `/room/[id]`: 대화, 요약과 원문 인용, 참여 승인·관리, 칭찬 별, 신고, CSV
+- `/admin`: 운영자 `dawithstory` 전용 관리
+- `/demo`: 저장되지 않는 가상 대화와 예시 요약을 사용하는 화면 체험
+- `/privacy`: 수집 정보·열람 범위·보관 기간 안내
+
+운영자 초기 비밀번호는 요청받은 값의 **scrypt 해시**로 설정했습니다. 코드에 평문 비밀번호는 없습니다. 운영자 세션은 서명된 HttpOnly·SameSite 쿠키이며 운영 환경에서는 Secure를 사용합니다. 로그인 시도는 서버에서 제한합니다.
+
+## 연결된 서비스와 구조
+
+- Next.js 16.3.8 / React 19.3.0 / TypeScript
+- Vercel 기존 `dawithstory` 프로젝트
+- Supabase `ftvrortfrobyfekmiwve` / `dawithstory`
+- Supabase Auth 이메일 계정 및 익명 참여 세션, Realtime
+- 인증된 Next.js API → Supabase Edge Function `story-api` → 제한된 DB RPC
+- 저장된 `ai_jobs`와 10초 Cron → OpenAI Responses `gpt-6-luna`
+
+익명 로그인은 Supabase에서 활성화했습니다. 참여자의 세션은 브라우저에 유지되어 같은 브라우저의 새로고침·재연결에서 복원됩니다. 시크릿 창이나 저장소 삭제 후에는 새로운 참여자로 처리됩니다.
+
+모든 공개 테이블에 RLS를 적용했습니다. 브라우저에는 공개 키만 전달합니다. 쓰기 RPC는 service_role만 실행할 수 있고, Edge에서 검증한 사용자와 운영자 권한만 전달합니다. 방 단위 잠금으로 동시 승인 시 정원 30명을 검사합니다. 진행자 본인의 방만 관리할 수 있으며, 대기·강퇴·거절 참여자의 접근을 제한합니다.
+
+## AI 동작
+
+- 기본 자동 정리: 새 발언 5개 또는 미정리 발언 30초. Cron 주기에 따라 최대 약 10초의 추가 지연이 있습니다.
+- 조용한 모드 8개/60초, 적극적 모드 3개/30초, 자동 끄기 지원
+- 진행자 연결이 60초 끊기면 다음 검사 시 일시정지합니다. 발언 API도 60초 경과를 검사합니다.
+- 직접 요청은 진행자 또는 권한을 받은 참여자만 가능합니다. 권한은 작업 실행·완료 시에도 검사합니다.
+- 앱의 요청 횟수·비용 한도는 없습니다. 제공업체 속도 제한과 장애에는 작업 상태를 유지하고 재시도합니다.
+- 발언·요청은 UUID로 중복 제거합니다. 작업 완료는 원자적으로 저장하며 요약·AI 발언·칭찬 추천의 중복을 막습니다.
+- 자동 요약은 최근 발언 최대 80개와 이전 요약을 사용합니다. 장기간 대화의 모든 발언을 매 요청마다 원문 그대로 보내지는 않습니다.
+- AI 칭찬은 추천일 뿐이며 진행자가 승인해야 1점이 지급됩니다. 순위표가 없습니다.
+
+OpenAI 키는 전용 스킬로 생성해 승인된 `.env.local`에 저장한 뒤 **Supabase Vault**에 암호화 저장했습니다. Vercel 클라이언트나 브라우저에는 전달하지 않습니다. `store:false`를 사용합니다.
+
+## 공개 운영 전 필요한 설정
+
+현재 **실제 이용자 AI는 꺼져 있습니다**. 실제 AI 검증은 가상 발언만 사용했습니다.
+
+1. **메일 발송:** Supabase의 사용자 정의 SMTP와 발신 도메인을 연결해야 일반 이용자의 이메일 인증·비밀번호 재설정 메일을 안정적으로 발송할 수 있습니다. 기본 메일 서비스만으로 공개 가입을 운영하지 마세요. 가입/재설정 화면과 콜백은 구현되어 있지만 외부 수신자 메일 배달은 검증하지 못했습니다.
+2. **인증 URL:** Supabase Authentication → URL Configuration의 Site URL과 Redirect URLs에 최종 운영 URL 및 `/auth/callback`을 등록합니다. 미리보기는 실제 사용하는 배포 URL을 등록합니다.
+3. **아동 데이터:** OpenAI Zero Data Retention 등 필요한 데이터 처리 조건, 이용 안내와 동의 절차를 확인합니다. `store:false`는 ZDR의 대체가 아닙니다. 조건이 갖춰진 뒤 `/admin`의 AI 연결 설정에서 활성화합니다.
+4. **실사용 부하:** 31건 동시 승인 API 요청 중 정확히 30건만 허용되는 검사를 통과했습니다. 실제 30개 브라우저를 통한 장시간 동시 이용 부하 검사는 별도로 남아 있습니다.
+
+사용자의 운영 주소 배포 요청에 따라 앱을 운영 주소에 배포하되, 실제 이용자 AI는 꺼진 상태로 유지합니다. 일반 이용자의 이메일 가입·재설정과 AI 활성화 전에 위 설정을 완료해야 합니다. 유료 서비스의 비용/제공업체 제한은 앱 횟수 제한과 별개입니다.
+
+관련 공식 문서: [OpenAI 모델](https://developers.openai.com/api/docs/models/gpt-6-luna), [미성년자 대상 안내](https://developers.openai.com/api/docs/guides/safety-checks/under-18-api-guidance), [Supabase SMTP](https://supabase.com/docs/guides/auth/auth-smtp).
+
+## 데이터베이스 재구성
+
+이미 연결된 프로젝트에는 적용되어 있습니다. 빈 프로젝트에 재설치할 때:
+
+1. `supabase/schema.sql` 적용
+2. `supabase/worker.sql`의 Edge URL을 해당 프로젝트 주소로 바꾸고 적용한 뒤 `supabase/usage.sql` 적용
+3. 서버 전용 비밀을 만들고 SHA-256 해시만 `private.settings.backend_hash`에 저장
+4. `story-api`의 `index.ts`, `provider.ts` 배포. 플랫폼 JWT 검사는 끄되 함수 내 `auth.getUser()`와 운영자/워커 비밀 해시 검증을 유지
+5. `node scripts/provision.mjs`로 승인된 로컬 키를 Vault에 저장
+6. Vercel에 공개 Supabase URL/키, `STORY_SERVER_SECRET`, `STORY_ADMIN_PASSWORD_HASH`를 설정
+
+워커 토큰은 DB에서 생성하여 Vault에 저장합니다. 키 또는 복호화된 값을 로그에 출력하지 마세요. Supabase service-role 키를 Next.js나 브라우저에 복사할 필요가 없습니다.
+
+종료 90일 후 매일 03:10(한국 시간) 정리 작업이 방·발언·요약·포인트를 함께 삭제합니다. 진행자와 운영자가 더 일찍 삭제할 수 있습니다. CSV는 수식 주입을 방지하고 한글 BOM을 포함합니다.
+
+## 검증 기록
+
+- TypeScript 검사, Next.js 운영 빌드 통과
+- CSV 수식 주입/인용/한글, 모의 제공업체 요청 101회, 429·5xx 재시도 분류 테스트 통과
+- `tests/database.sql`: 트랜잭션 후 롤백. 승인 전 생성 차단, 정원 30/31번째 차단, 방 격리, 발언·칭찬 중복 방지, 포인트 취소, AI 요청 101회 큐 저장, 60초 연결 중단, 90일 삭제 검사
+- `scripts/verify-api.mjs`: 실제 익명 세션으로 승인 대기/승인, 다른 방 API·RLS 접근 차단, 발언 중복, AI 권한, 포인트, 개인정보 보류, 일시정지·재개 검사
+- 가상 대화로 OpenAI 직접 호출 및 저장된 작업 큐의 자동 요약·직접 요청 완료 확인
+- 운영자 로그인과 승인, 참여자 브라우저 흐름, 반응형 화면 점검
+- 런타임 의존성 `npm audit --omit=dev`: 취약점 0건. 배포 CLI 개발 의존성의 별도 경고는 런타임 결과에 포함하지 않습니다.
+
+테스트 파일의 `.invalid` 주소와 발언은 가상 자료입니다. `.test-artifacts`의 세션 자료는 Git에서 제외합니다. 실제 이용자 데이터에 테스트 스크립트를 실행하지 마세요.
+
+## 마스코트
+
+`public/star-mascot.png`는 이미지 생성 도구로 만든 투명 배경 일러스트입니다. 노란색의 둥글고 통통한 별이 파란 말풍선을 들고 있는 귀여운 점토 장난감 형태, 작은 눈과 미소, 부드러운 빛과 파스텔 색감을 지정했습니다. 인터페이스에 사진 업로드는 없습니다. 동작 줄이기 설정은 운영체제의 `prefers-reduced-motion`을 따릅니다.

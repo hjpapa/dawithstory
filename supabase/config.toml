@@ -1,0 +1,3 @@
+[functions.story-api]
+verify_jwt = false
+# The handler verifies user JWTs with auth.getUser(), or a hashed server/worker secret.
