@@ -35,6 +35,7 @@ export type Room = {
   round_number: number;
   round_open: boolean;
   round_prompt: string;
+  speaker_ids?: string[] | null;
 };
 export type Member = {
   id: string;

@@ -594,6 +594,7 @@ Deno.serve(async (req) => {
       "room_settings",
       "round_control",
       "next_round",
+      "presentation_start",
       "rotate_code",
       "member",
       "message",

@@ -152,6 +152,75 @@
   display: flex;
   gap: 7px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.round-bar {
+  flex-wrap: wrap;
+}
+.presentation-banner {
+  margin: 0 22px 14px;
+  padding: 12px 16px;
+  display: grid;
+  gap: 6px;
+  border-radius: 14px;
+  background: #f5edff;
+  border: 1px solid #e3d2f4;
+  color: #6b4a8a;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.presentation-banner span {
+  line-height: 1.7;
+}
+.presenting-seat .seat-bubble {
+  border: 2px solid #b899d8;
+}
+.seat-name .presenter-label {
+  background: #efe4ff;
+  color: #69418f;
+}
+.presenter-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 45dvh;
+  overflow: auto;
+  margin: 18px 0;
+  padding: 3px;
+}
+.presenter-list label {
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #dde8ec;
+  border-radius: 12px;
+  font-size: 12px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.presenter-list label.chosen {
+  border-color: #aa87d1;
+  background: #f4edfc;
+}
+.presenter-list input {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: #8e6bb0;
+}
+.presenter-avatar {
+  font-size: 27px;
+  flex-shrink: 0;
+}
+.presenter-list label > span:last-child { min-width: 0; flex: 1; }
+.presenter-list small {
+  display: block;
+  font-size: 10px;
+  color: #7b8795;
 }
 .round-controls .button {
   padding: 9px 12px;
@@ -665,6 +734,7 @@
   }
 }
 @media (max-width: 540px) {
+  .presenter-list { grid-template-columns: minmax(0, 1fr); }
   .persistent-topic {
     padding: 10px 16px;
     gap: 8px;

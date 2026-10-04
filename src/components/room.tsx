@@ -34,6 +34,7 @@ import {
 } from "@/lib/domain";
 import { Header, Loading, Mascot, Modal, Notice } from "./ui";
 import { Plaza } from "./plaza";
+import { PresenterPicker } from "./presenter-picker";
 import { speakerMessages, type Speaker } from "@/lib/plaza";
 import { AVATAR_CATALOG } from "../../supabase/functions/story-api/avatars";
 export function RoomView({
@@ -66,6 +67,7 @@ export function RoomView({
   const [focusMessage, setFocusMessage] = useState<number | null>(null);
   const [nextRound, setNextRound] = useState(false);
   const [roundBusy, setRoundBusy] = useState(false);
+  const [pickingPresenters, setPickingPresenters] = useState(false);
   const topicRef = useRef<HTMLElement>(null);
   const [topicHeight, setTopicHeight] = useState(100);
   useEffect(() => {
@@ -183,20 +185,35 @@ export function RoomView({
     setError("");
     try {
       if (demo) {
-        if (["next_round", "round_control", "room_state"].includes(action)) {
+        if (
+          [
+            "next_round",
+            "presentation_start",
+            "round_control",
+            "room_state",
+          ].includes(action)
+        ) {
           setData((d) =>
             d
               ? {
                   ...d,
-                  myRoundSubmitted:
-                    action === "next_round" ? false : d.myRoundSubmitted,
+                  myRoundSubmitted: [
+                    "next_round",
+                    "presentation_start",
+                  ].includes(action)
+                    ? false
+                    : d.myRoundSubmitted,
                   room: {
                     ...d.room,
-                    ...(action === "next_round"
+                    ...(["next_round", "presentation_start"].includes(action)
                       ? {
                           round_number: d.room.round_number + 1,
                           round_open: true,
                           round_prompt: String(payload.prompt || ""),
+                          speaker_ids:
+                            action === "presentation_start"
+                              ? (payload.member_ids as string[])
+                              : null,
                         }
                       : action === "round_control"
                         ? { round_open: !!payload.open }
@@ -226,7 +243,10 @@ export function RoomView({
     if (
       !data.isHost &&
       !ask &&
-      (!data.room.round_open || data.myRoundSubmitted)
+      (!data.room.round_open ||
+        data.myRoundSubmitted ||
+        (data.room.speaker_ids &&
+          !data.room.speaker_ids.includes(data.me?.id || "")))
     )
       return;
     setBusy(true);
@@ -310,6 +330,21 @@ export function RoomView({
     }
     setRoundBusy(false);
   }
+  async function startPresentation(memberIds: string[]) {
+    if (!data?.isHost || roundBusy) return;
+    setRoundBusy(true);
+    const changed = await mutate("presentation_start", {
+      expected_round: data.room.round_number,
+      member_ids: memberIds,
+    });
+    if (changed) {
+      setPickingPresenters(false);
+      setInfo(
+        "선택한 친구들의 발표를 시작했어요. 교사는 언제든 함께 말할 수 있어요.",
+      );
+    }
+    setRoundBusy(false);
+  }
   function openSpeaker(value: Speaker, messageId: number | null = null) {
     setFocusMessage(messageId);
     setSpeaker(value);
@@ -381,7 +416,10 @@ export function RoomView({
       messages.some(
         (m) => m.member_id === me.id && m.round_number === room.round_number,
       ));
-  const roundBlocked = !isHost && !ask && (!room.round_open || submitted);
+  const listening =
+    !!room.speaker_ids && !room.speaker_ids.includes(me?.id || "");
+  const roundBlocked =
+    !isHost && !ask && (!room.round_open || submitted || listening);
   const sendBlocked =
     !active ||
     !!me?.muted ||
@@ -789,6 +827,10 @@ export function RoomView({
             onSpeaker={openSpeaker}
             onLock={() => changeRound("round_control")}
             onNext={() => setNextRound(true)}
+            onPresenters={() => {
+              setError("");
+              setPickingPresenters(true);
+            }}
           />
           <form className="composer" onSubmit={send}>
             <div className="composer-options">
@@ -853,9 +895,11 @@ export function RoomView({
                     : me?.muted
                       ? "지금은 친구들의 이야기를 들어요"
                       : roundBlocked
-                        ? submitted
-                          ? "생각을 남겼어요. 다음 차례를 기다려 주세요"
-                          : "진행자가 발언을 열면 이야기할 수 있어요"
+                        ? listening
+                          ? "지금은 발표하는 친구들의 이야기를 들어요"
+                          : submitted
+                            ? "생각을 남겼어요. 다음 차례를 기다려 주세요"
+                            : "진행자가 발언을 열면 이야기할 수 있어요"
                         : ask
                           ? "이야기별에게 궁금한 점을 물어보세요"
                           : "친구의 말에 이어 의견, 질문, 반론을 나눠 주세요…"
@@ -1231,13 +1275,18 @@ export function RoomView({
       )}
       {nextRound && (
         <Modal
-          title="이어서 대화할 수 있도록 열까요?"
+          title={
+            room.speaker_ids
+              ? "모두 함께 대화할까요?"
+              : "이어서 대화할 수 있도록 열까요?"
+          }
           close={() => setNextRound(false)}
         >
           <p>
             같은 토론 주제로 대화를 이어갑니다. 친구의 의견에 답하거나, 질문하고
             반론할 수 있도록 다음 발언 차례를 열어요.
           </p>
+          <Notice error>{error}</Notice>
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -1245,10 +1294,24 @@ export function RoomView({
             }}
           >
             <button className="button primary full" disabled={roundBusy}>
-              {roundBusy ? "차례를 여는 중…" : "다음 대화 열기"}
+              {roundBusy
+                ? "차례를 여는 중…"
+                : room.speaker_ids
+                  ? "모두 대화하기"
+                  : "다음 대화 열기"}
             </button>
           </form>
         </Modal>
+      )}
+      {pickingPresenters && isHost && (
+        <PresenterPicker
+          members={members}
+          current={room.speaker_ids}
+          busy={roundBusy}
+          error={error}
+          close={() => setPickingPresenters(false)}
+          start={startPresentation}
+        />
       )}
       {selected && (
         <Modal

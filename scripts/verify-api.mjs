@@ -229,6 +229,19 @@ if (mode === "setup") {
     });
     await good("room_state", { room_id: room.id, state: "active" });
     fs.writeFileSync(path, JSON.stringify(state, null, 2));
+    const listener = await good("join", { code:room.code, nickname:"검증청중", avatar:"🐼" }, other.token);
+    await good("member", {room_id:room.id,member_id:listener.id,state:"approved"});
+    await denied("presentation_start", {room_id:room.id,expected_round:3,member_ids:[member.id]});
+    await good("presentation_start", {room_id:room.id,expected_round:3,member_ids:[member.id]});
+    snap = await good("snapshot", {room_id:room.id}, guest.token);
+    assert.deepEqual(snap.room.speaker_ids,[member.id]);
+    await good("message", {room_id:room.id,expected_round:4,client_id:crypto.randomUUID(),content:"선택 발표입니다."},guest.token);
+    await denied("message", {room_id:room.id,expected_round:4,client_id:crypto.randomUUID(),content:"청중의 발표 시도"},other.token);
+    await good("message", {room_id:room.id,expected_round:4,client_id:crypto.randomUUID(),content:"교사 진행 발언입니다."});
+    await good("next_round", {room_id:room.id,expected_round:4});
+    snap = await good("snapshot", {room_id:room.id},other.token);
+    assert.equal(snap.room.speaker_ids,null);
+    await good("message", {room_id:room.id,expected_round:5,client_id:crypto.randomUUID(),content:"다시 모두 함께 이야기합니다."},other.token);
     console.log(
       JSON.stringify({
         passed: [
@@ -247,6 +260,8 @@ if (mode === "setup") {
           "round-lock-and-held-quota",
           "concurrent-single-speech",
           "history-preserved",
+          "selected-presentation-api",
+          "listener-blocked-and-everyone-restored",
         ],
         roomId: room.id,
         code: room.code,

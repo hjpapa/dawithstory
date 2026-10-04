@@ -19,6 +19,7 @@ create table public.rooms (
  is_demo boolean not null default false,
  round_number integer not null default 1 check(round_number > 0),
  round_open boolean not null default true,
+ speaker_ids uuid[] check(speaker_ids is null or (cardinality(speaker_ids) between 1 and 30 and array_position(speaker_ids,null) is null)),
  round_prompt text not null default '' check(char_length(round_prompt) <= 500),
  host_seen_at timestamptz not null default now(), created_at timestamptz not null default now(), ended_at timestamptz,
  summary_cursor bigint not null default 0, ai_error text, revision bigint not null default 0
@@ -139,7 +140,7 @@ end $$;
 
 -- Every mutating room operation locks the room, including capacity checks and message writes.
 create function public.story_mutate(p_actor uuid,p_admin boolean,p_action text,p jsonb) returns jsonb language plpgsql security definer set search_path='' as $$
-declare r public.rooms; m public.members; target public.members; msg public.messages; pr public.praise; outval jsonb; ishost boolean; rid uuid; st text; uid uuid;
+declare r public.rooms; m public.members; target public.members; msg public.messages; pr public.praise; outval jsonb; ishost boolean; rid uuid; st text; uid uuid; chosen uuid[];
 begin
  if coalesce(auth.jwt()->>'role','')<>'service_role' then raise exception 'Forbidden'; end if;
  if not p_admin and p_actor is null then raise exception '로그인이 필요해요.'; end if;
@@ -177,12 +178,18 @@ begin
   if st not in ('active','paused','ended') then raise exception '잘못된 상태예요.'; end if;
   update public.rooms set state=st,host_seen_at=now(),ended_at=case when st='ended' then now() else ended_at end where id=r.id;
   if st<>'active' then update public.ai_jobs set status='cancelled' where room_id=r.id and status in ('queued','running'); end if;
- elsif p_action in ('round_control','next_round') then
+ elsif p_action in ('round_control','next_round','presentation_start') then
   if not ishost then raise exception '진행자만 차례를 바꿀 수 있어요.'; end if;
   if r.state<>'active' then raise exception '대화방을 먼저 열어 주세요.'; end if;
   if (p->>'expected_round')::integer is distinct from r.round_number then raise exception '차례가 바뀌었어요. 새로 확인해 주세요.'; end if;
-  if p_action='next_round' then
-   update public.rooms set round_number=round_number+1,round_open=true,round_prompt=coalesce(trim(p->>'prompt'),'') where id=r.id;
+  if p_action='presentation_start' then
+   if jsonb_typeof(p->'member_ids') is distinct from 'array' then raise exception '발표할 참여자를 선택해 주세요.'; end if;
+   select array_agg(distinct value::uuid) into chosen from jsonb_array_elements_text(p->'member_ids');
+   if chosen is null or cardinality(chosen) not between 1 and 30 or array_position(chosen,null) is not null then raise exception '발표할 참여자를 1명 이상 선택해 주세요.'; end if;
+   if (select count(*) from public.members where room_id=r.id and id=any(chosen) and state='approved' and not muted)<>cardinality(chosen) then raise exception '현재 발언 가능한 참여자만 선택할 수 있어요.'; end if;
+   update public.rooms set round_number=round_number+1,round_open=true,speaker_ids=chosen,round_prompt='' where id=r.id;
+  elsif p_action='next_round' then
+   update public.rooms set round_number=round_number+1,round_open=true,speaker_ids=null,round_prompt=coalesce(trim(p->>'prompt'),'') where id=r.id;
   else
    if jsonb_typeof(p->'open') is distinct from 'boolean' then raise exception '발언 상태를 확인해 주세요.'; end if;
    update public.rooms set round_open=(p->>'open')::boolean where id=r.id;
@@ -220,6 +227,7 @@ begin
    if p ? 'expected_round' and (p->>'expected_round')::integer is distinct from r.round_number then raise exception '차례가 바뀌었어요. 내용을 확인하고 다시 보내 주세요.'; end if;
    if not ishost then
     if not r.round_open then raise exception '진행자가 발언을 열면 이야기할 수 있어요.'; end if;
+    if r.speaker_ids is not null and not (m.id=any(r.speaker_ids)) then raise exception '지금은 선택된 참여자가 발표하는 시간이에요.'; end if;
     if exists(select 1 from public.messages where room_id=r.id and member_id=m.id and round_number=r.round_number) then raise exception '이번 차례에는 이미 발언했어요. 다음 차례를 기다려 주세요.'; end if;
    end if;
    insert into public.messages(room_id,user_id,member_id,role,nickname,avatar,content,stance,client_id,visibility,safety_reason,round_number)
