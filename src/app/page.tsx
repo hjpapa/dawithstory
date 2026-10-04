@@ -11,7 +11,7 @@ import {
   Star,
   Users,
 } from "lucide-react";
-import { AVATARS } from "@/lib/domain";
+import { AvatarPicker } from "@/components/avatar-picker";
 import { api, supabase } from "@/lib/supabase";
 import { Header, Mascot, Notice } from "@/components/ui";
 export default function Home() {
@@ -135,25 +135,7 @@ export default function Home() {
                 required
                 autoComplete="nickname"
               />
-              <fieldset className="avatar-field">
-                <legend>
-                  오늘의 나를 골라요 <span>내 아바타</span>
-                </legend>
-                <div className="avatar-picker">
-                  {AVATARS.map((a) => (
-                    <button
-                      type="button"
-                      key={a}
-                      className={a === avatar ? "selected" : ""}
-                      aria-label={`${a} 아바타`}
-                      aria-pressed={a === avatar}
-                      onClick={() => setAvatar(a)}
-                    >
-                      {a}
-                    </button>
-                  ))}
-                </div>
-              </fieldset>
+              <AvatarPicker value={avatar} onChange={setAvatar} />
               <Notice error>{error}</Notice>
               <button className="button primary join-button" disabled={busy}>
                 {busy ? "문을 두드리는 중…" : "이야기 참여하기"}

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./plaza.css";
 export const metadata: Metadata = {
   title: "다함께 이야기 · 생각이 만나 반짝이는 곳",
   description:

@@ -71,10 +71,11 @@ if (mode === "setup") {
       kind: "discussion",
     });
     state.room = room;
+    fs.writeFileSync(path, JSON.stringify(state, null, 2));
     await good("room_state", { room_id: room.id, state: "active" });
     const member = await good(
       "join",
-      { code: room.code, nickname: "검증토끼", avatar: "🐰" },
+      { code: room.code, nickname: "검증거북이", avatar: "🐢" },
       guest.token,
     );
     state.member = member;
@@ -145,6 +146,38 @@ if (mode === "setup") {
     });
     snap = await good("snapshot", { room_id: room.id }, guest.token);
     assert.equal(snap.myPoints, 1);
+    assert.equal(snap.myRoundSubmitted, true);
+    await denied("next_round", { room_id: room.id, expected_round: 1 });
+    await good("next_round", {
+      room_id: room.id,
+      expected_round: 1,
+      prompt: "다음 가상 질문",
+    });
+    snap = await good("snapshot", { room_id: room.id }, guest.token);
+    assert.equal(snap.myRoundSubmitted, false);
+    assert.equal(snap.room.round_number, 2);
+    await denied("message", {
+      room_id: room.id,
+      content: "오래된 차례",
+      expected_round: 1,
+      client_id: crypto.randomUUID(),
+    });
+    await good("round_control", {
+      room_id: room.id,
+      expected_round: 2,
+      open: false,
+    });
+    await denied("message", {
+      room_id: room.id,
+      content: "잠긴 차례",
+      expected_round: 2,
+      client_id: crypto.randomUUID(),
+    });
+    await good("round_control", {
+      room_id: room.id,
+      expected_round: 2,
+      open: true,
+    });
     const held = await good(
       "message",
       {
@@ -156,9 +189,37 @@ if (mode === "setup") {
     );
     assert.equal(held.visibility, "held");
     snap = await good("snapshot", { room_id: room.id }, guest.token);
+    assert.equal(snap.myRoundSubmitted, true);
+    await denied("message", {
+      room_id: room.id,
+      content: "같은 차례 재발언",
+      expected_round: 2,
+      client_id: crypto.randomUUID(),
+    });
     assert.equal(
       snap.messages.some((m) => m.id === held.id),
       false,
+    );
+    await good("next_round", { room_id: room.id, expected_round: 2 });
+    const concurrent = await Promise.all(
+      Array.from({ length: 3 }, () =>
+        call(
+          "message",
+          {
+            room_id: room.id,
+            expected_round: 3,
+            content: "동시 전송 가상 발언",
+            client_id: crypto.randomUUID(),
+          },
+          guest.token,
+        ),
+      ),
+    );
+    assert.equal(concurrent.filter((r) => r.ok).length, 1);
+    snap = await good("snapshot", { room_id: room.id }, guest.token);
+    assert.equal(
+      snap.messages.filter((m) => m.member_id === member.id).length,
+      2,
     );
     await good("room_state", { room_id: room.id, state: "paused" });
     await denied("message", {
@@ -181,6 +242,11 @@ if (mode === "setup") {
           "praise-idempotency",
           "PII-held",
           "pause-resume",
+          "new-avatar",
+          "round-permission-and-stale-round",
+          "round-lock-and-held-quota",
+          "concurrent-single-speech",
+          "history-preserved",
         ],
         roomId: room.id,
         code: room.code,
@@ -189,7 +255,9 @@ if (mode === "setup") {
   } else if (mode === "ai") {
     await good("room_state", { room_id: state.room.id, state: "active" });
     const before = await good("snapshot", { room_id: state.room.id });
-    const oldReplies = new Set(before.messages.filter(m => m.role === 'ai').map(m => m.id));
+    const oldReplies = new Set(
+      before.messages.filter((m) => m.role === "ai").map((m) => m.id),
+    );
     const timer = setInterval(
       () => good("heartbeat", { room_id: state.room.id }).catch(() => {}),
       15000,
@@ -203,7 +271,10 @@ if (mode === "setup") {
       for (let i = 0; i < 24; i++) {
         await new Promise((r) => setTimeout(r, 2500));
         const snap = await good("snapshot", { room_id: state.room.id });
-        if (snap.summary && snap.messages.some(m => m.role === 'ai' && !oldReplies.has(m.id))) {
+        if (
+          snap.summary &&
+          snap.messages.some((m) => m.role === "ai" && !oldReplies.has(m.id))
+        ) {
           console.log(
             JSON.stringify({
               passed: "durable-ai-worker",
@@ -221,19 +292,32 @@ if (mode === "setup") {
       clearInterval(timer);
     }
   } else if (mode === "capacity") {
-    const {rooms} = await good("rooms");
-    const room = rooms.find(r => r.title === "동시 승인 가상 검증 20261003");
+    const { rooms } = await good("rooms");
+    const room = rooms.find((r) => r.title === "동시 승인 가상 검증 20261003");
     assert.ok(room);
-    await good("room_state", {room_id:room.id, state:"active"});
-    const before = await good("snapshot", {room_id:room.id});
-    assert.equal(before.members.length,31);
-    const results = await Promise.all(before.members.map(member=>call("member",{room_id:room.id,member_id:member.id,state:"approved"},host.token)));
-    assert.equal(results.filter(r=>r.ok).length,30);
-    assert.equal(results.filter(r=>!r.ok).length,1);
-    const after = await good("snapshot", {room_id:room.id});
-    assert.equal(after.members.filter(m=>m.state==='approved').length,30);
-    await good("delete_room", {room_id:room.id});
-    console.log('PASS: 31 simultaneous approval requests admit exactly 30; test room removed.');
+    await good("room_state", { room_id: room.id, state: "active" });
+    const before = await good("snapshot", { room_id: room.id });
+    assert.equal(before.members.length, 31);
+    const results = await Promise.all(
+      before.members.map((member) =>
+        call(
+          "member",
+          { room_id: room.id, member_id: member.id, state: "approved" },
+          host.token,
+        ),
+      ),
+    );
+    assert.equal(results.filter((r) => r.ok).length, 30);
+    assert.equal(results.filter((r) => !r.ok).length, 1);
+    const after = await good("snapshot", { room_id: room.id });
+    assert.equal(
+      after.members.filter((m) => m.state === "approved").length,
+      30,
+    );
+    await good("delete_room", { room_id: room.id });
+    console.log(
+      "PASS: 31 simultaneous approval requests admit exactly 30; test room removed.",
+    );
   } else if (mode === "browser") {
     await good("room_state", { room_id: state.room.id, state: "active" });
     console.log(

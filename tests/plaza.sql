@@ -1,0 +1,52 @@
+-- Synthetic records only. Every test change is rolled back.
+begin;
+select set_config('request.jwt.claims','{"role":"service_role"}',true);
+do $$
+declare host uuid:=gen_random_uuid(); guest uuid:=gen_random_uuid(); other_host uuid:=gen_random_uuid(); rid uuid; mid uuid; cid uuid:=gen_random_uuid(); result jsonb; original bigint; denied boolean;
+begin
+ insert into auth.users(id,email,is_anonymous) values(host,'plaza-host@example.invalid',false),(other_host,'plaza-other@example.invalid',false),(guest,null,true);
+ insert into public.profiles(id,email,status) values(host,'plaza-host@example.invalid','approved'),(other_host,'plaza-other@example.invalid','approved');
+ result:=public.story_mutate(host,false,'create_room','{"title":"Plaza fixture","topic":"Synthetic only","kind":"discussion"}'); rid:=(result->>'id')::uuid;
+ perform public.story_mutate(host,false,'room_state',jsonb_build_object('room_id',rid,'state','active'));
+ result:=public.story_mutate(guest,false,'join',jsonb_build_object('code',result->>'code','nickname','가상 거북이','avatar','🐢')); mid:=(result->>'id')::uuid;
+ perform public.story_mutate(host,false,'member',jsonb_build_object('room_id',rid,'member_id',mid,'state','approved'));
+ result:=public.story_mutate(guest,false,'message',jsonb_build_object('room_id',rid,'content','첫 생각','client_id',cid,'expected_round',1)); original:=(result->>'id')::bigint;
+ result:=public.story_mutate(guest,false,'message',jsonb_build_object('room_id',rid,'content','첫 생각','client_id',cid,'expected_round',1));
+ if (result->>'id')::bigint<>original then raise exception 'FAIL duplicate retry changed id'; end if;
+ denied:=false; begin perform public.story_mutate(guest,false,'message',jsonb_build_object('room_id',rid,'content','두 번째','client_id',gen_random_uuid(),'expected_round',1)); exception when others then denied:=true; end;
+ if not denied then raise exception 'FAIL second speech allowed'; end if;
+ perform public.story_mutate(host,false,'message_visibility',jsonb_build_object('room_id',rid,'message_id',original,'visibility','hidden'));
+ denied:=false; begin perform public.story_mutate(guest,false,'message',jsonb_build_object('room_id',rid,'content','숨김 후 재시도','client_id',gen_random_uuid())); exception when others then denied:=true; end;
+ if not denied then raise exception 'FAIL hiding reset speech quota'; end if;
+ denied:=false; begin perform public.story_mutate(guest,false,'next_round',jsonb_build_object('room_id',rid,'expected_round',1)); exception when others then denied:=true; end;
+ if not denied then raise exception 'FAIL participant advanced round'; end if;
+ denied:=false; begin perform public.story_mutate(other_host,false,'round_control',jsonb_build_object('room_id',rid,'expected_round',1,'open',false)); exception when others then denied:=true; end;
+ if not denied then raise exception 'FAIL another host controlled round'; end if;
+ perform public.story_mutate(host,false,'next_round',jsonb_build_object('room_id',rid,'expected_round',1,'prompt','다음 질문'));
+ denied:=false; begin perform public.story_mutate(host,false,'next_round',jsonb_build_object('room_id',rid,'expected_round',1)); exception when others then denied:=true; end;
+ if not denied or (select round_number from public.rooms where id=rid)<>2 then raise exception 'FAIL concurrent next-round guard'; end if;
+ result:=public.story_mutate(guest,false,'message',jsonb_build_object('room_id',rid,'content','첫 생각','client_id',cid,'expected_round',1));
+ if (result->>'id')::bigint<>original then raise exception 'FAIL retry crossed round'; end if;
+ denied:=false; begin perform public.story_mutate(guest,false,'message',jsonb_build_object('room_id',rid,'content','오래된 화면','client_id',gen_random_uuid(),'expected_round',1)); exception when others then denied:=true; end;
+ if not denied then raise exception 'FAIL stale round accepted'; end if;
+ perform public.story_mutate(host,false,'round_control',jsonb_build_object('room_id',rid,'expected_round',2,'open',false));
+ denied:=false; begin perform public.story_mutate(guest,false,'message',jsonb_build_object('room_id',rid,'content','잠긴 차례','client_id',gen_random_uuid(),'expected_round',2)); exception when others then denied:=true; end;
+ if not denied then raise exception 'FAIL locked round accepted'; end if;
+ perform public.story_mutate(host,false,'message',jsonb_build_object('room_id',rid,'content','진행자 안내','client_id',gen_random_uuid(),'expected_round',2));
+ perform public.story_mutate(host,false,'round_control',jsonb_build_object('room_id',rid,'expected_round',2,'open',true));
+ perform public.story_mutate(guest,false,'message',jsonb_build_object('room_id',rid,'content','검토용 가상 발언','client_id',gen_random_uuid(),'expected_round',2,'visibility','held'));
+ denied:=false; begin perform public.story_mutate(guest,false,'message',jsonb_build_object('room_id',rid,'content','검토 중 재시도','client_id',gen_random_uuid(),'expected_round',2)); exception when others then denied:=true; end;
+ if not denied then raise exception 'FAIL held message did not count'; end if;
+ if (select count(*) from public.messages where room_id=rid and member_id=mid)<>2 then raise exception 'FAIL lost history'; end if;
+ -- Round controls do not impose an AI request quota, even while collection is locked.
+ update public.rooms set is_demo=true where id=rid;
+ perform public.story_mutate(host,false,'member',jsonb_build_object('room_id',rid,'member_id',mid,'can_ask_ai',true));
+ perform public.story_mutate(host,false,'round_control',jsonb_build_object('room_id',rid,'expected_round',2,'open',false));
+ for i in 1..101 loop perform public.story_mutate(guest,false,'ask_ai',jsonb_build_object('room_id',rid,'content','가상 요청','client_id',gen_random_uuid())); end loop;
+ if (select count(*) from public.ai_jobs where room_id=rid)<>101 then raise exception 'FAIL AI quota'; end if;
+ perform public.story_mutate(host,false,'room_state',jsonb_build_object('room_id',rid,'state','paused'));
+ denied:=false; begin perform public.story_mutate(host,false,'next_round',jsonb_build_object('room_id',rid,'expected_round',2)); exception when others then denied:=true; end;
+ if not denied then raise exception 'FAIL paused room advanced'; end if;
+ raise notice 'PASS: one speech, retries, hidden/held, host ownership, lock/unlock, stale/concurrent rounds, history, 101 AI requests, paused room';
+end $$;
+rollback;

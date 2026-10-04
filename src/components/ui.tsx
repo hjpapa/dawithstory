@@ -103,7 +103,7 @@ export function Modal({
     <dialog ref={ref} className="modal" onCancel={close}>
       <div className="modal-heading">
         <h2>{title}</h2>
-        <button className="icon-button" onClick={close} aria-label="닫기">
+        <button type="button" className="icon-button" onClick={close} aria-label="닫기">
           <X />
         </button>
       </div>

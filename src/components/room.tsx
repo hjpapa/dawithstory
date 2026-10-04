@@ -33,6 +33,9 @@ import {
   type SummaryItem,
 } from "@/lib/domain";
 import { Header, Loading, Mascot, Modal, Notice } from "./ui";
+import { Plaza } from "./plaza";
+import { speakerMessages, type Speaker } from "@/lib/plaza";
+import { AVATAR_CATALOG } from "../../supabase/functions/story-api/avatars";
 export function RoomView({
   roomId,
   initial,
@@ -59,10 +62,23 @@ export function RoomView({
   const [reason, setReason] = useState("");
   const [category, setCategory] = useState("reason");
   const [confirm, setConfirm] = useState<"end" | "delete" | null>(null);
-  const bottom = useRef<HTMLDivElement>(null);
+  const [speaker, setSpeaker] = useState<Speaker | null>(null);
+  const [focusMessage, setFocusMessage] = useState<number | null>(null);
+  const [nextRound, setNextRound] = useState(false);
+  const [roundPrompt, setRoundPrompt] = useState("");
+  const [roundBusy, setRoundBusy] = useState(false);
+  useEffect(() => {
+    if (!speaker || !focusMessage) return;
+    document
+      .getElementById("message-" + focusMessage)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [speaker, focusMessage]);
+  useEffect(() => {
+    if (data && !data.isHost && (!data.me?.can_ask_ai || !data.aiEnabled))
+      setAsk(false);
+  }, [data?.isHost, data?.me?.can_ask_ai, data?.aiEnabled]);
   const input = useRef<HTMLTextAreaElement>(null);
-  const stickToBottom = useRef(true);
-  const [newMessages, setNewMessages] = useState(false);
+  const pendingSend = useRef<{ signature: string; id: string } | null>(null);
   const previousPoints = useRef<number | null>(null);
   const [celebrating, setCelebrating] = useState(false);
   useEffect(() => {
@@ -150,11 +166,6 @@ export function RoomView({
     const id = setInterval(beat, 15000);
     return () => clearInterval(id);
   }, [data?.isHost, data?.canHeartbeat, roomId, demo]);
-  useEffect(() => {
-    if (stickToBottom.current)
-      bottom.current?.scrollIntoView({ behavior: "auto", block: "nearest" });
-    else setNewMessages(true);
-  }, [data?.messages?.length]);
   async function mutate(
     action: string,
     payload: Record<string, unknown> = {},
@@ -162,6 +173,32 @@ export function RoomView({
     setError("");
     try {
       if (demo) {
+        if (["next_round", "round_control", "room_state"].includes(action)) {
+          setData((d) =>
+            d
+              ? {
+                  ...d,
+                  myRoundSubmitted:
+                    action === "next_round" ? false : d.myRoundSubmitted,
+                  room: {
+                    ...d.room,
+                    ...(action === "next_round"
+                      ? {
+                          round_number: d.room.round_number + 1,
+                          round_open: true,
+                          round_prompt: String(payload.prompt || ""),
+                        }
+                      : action === "round_control"
+                        ? { round_open: !!payload.open }
+                        : {
+                            state: payload.state as Snapshot["room"]["state"],
+                          }),
+                  },
+                }
+              : d,
+          );
+          return true;
+        }
         setInfo("체험 화면이에요. 직접 대화방을 만들면 사용할 수 있어요.");
         return true;
       }
@@ -175,7 +212,13 @@ export function RoomView({
   }
   async function send(e: React.FormEvent) {
     e.preventDefault();
-    if (!text.trim() || busy) return;
+    if (!text.trim() || busy || !data) return;
+    if (
+      !data.isHost &&
+      !ask &&
+      (!data.room.round_open || data.myRoundSubmitted)
+    )
+      return;
     setBusy(true);
     setError("");
     try {
@@ -183,24 +226,49 @@ export function RoomView({
         const m: Message = {
           id: Date.now(),
           room_id: "demo",
-          role: "host",
-          member_id: null,
-          nickname: "나",
-          avatar: "🌷",
-          content: text,
+          role: ask ? "ai" : data.isHost ? "host" : "member",
+          member_id: !ask && !data.isHost ? data.me!.id : null,
+          nickname: ask
+            ? "이야기별"
+            : data.isHost
+              ? "진행자"
+              : data.me!.nickname,
+          avatar: ask ? "⭐" : data.isHost ? "🌷" : data.me!.avatar,
+          round_number: data.room.round_number,
+          content: ask
+            ? "체험용 답변이에요. 서로의 생각에서 공통점을 찾아보고, 함께 실천할 한 가지를 골라 볼까요?"
+            : text,
           visibility: "visible",
           created_at: new Date().toISOString(),
         };
-        setData((d) => (d ? { ...d, messages: [...d.messages, m] } : d));
+        setData((d) =>
+          d
+            ? {
+                ...d,
+                myRoundSubmitted: !ask && !d.isHost ? true : d.myRoundSubmitted,
+                messages: [...d.messages, m],
+              }
+            : d,
+        );
         setInfo("체험 대화는 이 화면에만 남아요. AI 요약은 예시예요.");
       } else {
+        const signature = JSON.stringify([
+          roomId,
+          text,
+          ask,
+          stance,
+          data.room.round_number,
+        ]);
+        if (pendingSend.current?.signature !== signature)
+          pendingSend.current = { signature, id: crypto.randomUUID() };
         const result = await api<{ visibility?: string }>(
           ask ? "ask_ai" : "message",
           {
             room_id: roomId,
             content: text,
             stance: data?.room.kind === "debate" ? stance : null,
-            client_id: crypto.randomUUID(),
+            client_id: pendingSend.current.id,
+            expected_round: data.room.round_number,
           },
         );
         if (result.visibility === "held")
@@ -209,13 +277,32 @@ export function RoomView({
         await refresh();
       }
       setText("");
-      stickToBottom.current = true;
+      pendingSend.current = null;
       input.current?.focus();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
     }
+  }
+  async function changeRound(action: "next_round" | "round_control") {
+    if (roundBusy || !data) return;
+    setRoundBusy(true);
+    const changed = await mutate(action, {
+      expected_round: data.room.round_number,
+      open: !data.room.round_open,
+      prompt: roundPrompt,
+    });
+    if (changed && action === "next_round") {
+      setNextRound(false);
+      setRoundPrompt("");
+      setInfo("새 차례를 열었어요. 지난 발언은 캐릭터의 기록에 남아 있어요.");
+    }
+    setRoundBusy(false);
+  }
+  function openSpeaker(value: Speaker, messageId: number | null = null) {
+    setFocusMessage(messageId);
+    setSpeaker(value);
   }
   async function exportData() {
     try {
@@ -278,6 +365,25 @@ export function RoomView({
   const { room, isHost, members, messages, summary, praise, me } = data;
   const canAsk = isHost || !!me?.can_ask_ai;
   const active = room.state === "active";
+  const submitted =
+    !!data.myRoundSubmitted ||
+    (!!me &&
+      messages.some(
+        (m) => m.member_id === me.id && m.round_number === room.round_number,
+      ));
+  const roundBlocked = !isHost && !ask && (!room.round_open || submitted);
+  const sendBlocked =
+    !active ||
+    !!me?.muted ||
+    roundBlocked ||
+    (ask && (!canAsk || !data.aiEnabled));
+  const historyMessages = speaker ? speakerMessages(messages, speaker) : [];
+  const speakerName =
+    speaker?.role === "host"
+      ? "진행자"
+      : speaker?.role === "ai"
+        ? "이야기별"
+        : members.find((m) => m.id === speaker?.memberId)?.nickname || "참여자";
   const approved = members.filter((m) => m.state === "approved");
   const pending = members.filter((m) => m.state === "waiting");
   const thinking = data.jobs.some((j) =>
@@ -293,14 +399,19 @@ export function RoomView({
               key={id}
               title="원문 발언 보기"
               onClick={() => {
-                setTab("chat");
-                setTimeout(
-                  () =>
-                    document
-                      .getElementById("message-" + id)
-                      ?.scrollIntoView({ behavior: "smooth", block: "center" }),
-                  50,
-                );
+                const original = messages.find((m) => m.id === id);
+                if (original)
+                  openSpeaker(
+                    {
+                      role: original.member_id
+                        ? "member"
+                        : original.role === "ai"
+                          ? "ai"
+                          : "host",
+                      memberId: original.member_id || undefined,
+                    },
+                    id,
+                  );
               }}
             >
               #{id}
@@ -311,8 +422,12 @@ export function RoomView({
     ));
   }
   return (
-    <div className="room-app">
-      {celebrating && <div className="point-celebration" role="status">✦ 칭찬 별을 받았어요! ✦</div>}
+    <div className="room-app plaza-room">
+      {celebrating && (
+        <div className="point-celebration" role="status">
+          ✦ 칭찬 별을 받았어요! ✦
+        </div>
+      )}
       <Header>
         <Link href={demo || !isHost ? "/" : "/dashboard"} className="nav-text">
           <ArrowLeft size={17} /> {demo || !isHost ? "처음으로" : "나의 대화방"}
@@ -329,8 +444,67 @@ export function RoomView({
       </Header>
       {demo && (
         <div className="demo-banner">
-          ✦ 진행자 화면 체험 · 가상 대화와 예시 요약이에요{" "}
+          ✦ {isHost ? "진행자" : "참여자"} 체험 · 가상 대화와 예시 요약이에요{" "}
+          <button
+            className="text-button"
+            onClick={() => {
+              setData((d) => {
+                if (!d) return d;
+                const me = d.isHost
+                  ? d.members.find((m) => m.id === "h")!
+                  : null;
+                return {
+                  ...d,
+                  isHost: !d.isHost,
+                  me,
+                  myRoundSubmitted:
+                    !!me &&
+                    d.messages.some(
+                      (m) =>
+                        m.member_id === me.id &&
+                        m.round_number === d.room.round_number,
+                    ),
+                };
+              });
+              setAsk(false);
+              setTab("chat");
+            }}
+          >
+            {isHost ? "참여자로 체험" : "진행자로 체험"}
+          </button>
           <Link href="/login">내 대화방 만들기</Link>
+          <button
+            className="text-button"
+            onClick={() =>
+              setData((d) =>
+                d
+                  ? {
+                      ...d,
+                      members:
+                        d.members.length > 8
+                          ? d.members.slice(0, 8)
+                          : [
+                              ...d.members,
+                              ...AVATAR_CATALOG.slice(8, 30).map(
+                                (a, index) => ({
+                                  id: `extra-${index}`,
+                                  user_id: `extra-${index}`,
+                                  room_id: "demo",
+                                  nickname: a.name,
+                                  avatar: a.emoji,
+                                  state: "approved",
+                                  muted: false,
+                                  can_ask_ai: false,
+                                }),
+                              ),
+                            ],
+                    }
+                  : d,
+              )
+            }
+          >
+            {members.length > 8 ? "8명으로 보기" : "30명으로 보기"}
+          </button>
         </div>
       )}
       <section className="room-top">
@@ -398,7 +572,7 @@ export function RoomView({
           onClick={() => setTab("chat")}
         >
           <MessageCircle size={17} />
-          대화
+          이야기 광장
         </button>
         <button
           className={tab === "summary" ? "active" : ""}
@@ -412,10 +586,11 @@ export function RoomView({
           onClick={() => setTab("people")}
         >
           <Users size={17} />
-          함께하는 사람
+          {isHost ? "참여 관리" : "함께하는 사람"}
+          {pending.length > 0 && ` · ${pending.length}`}
         </button>
       </nav>
-      <main className="conversation-layout">
+      <main className={`conversation-layout plaza-layout view-${tab}`}>
         <aside
           className={`people-panel panel ${tab === "people" ? "mobile-show" : ""}`}
         >
@@ -584,147 +759,23 @@ export function RoomView({
         <section
           className={`chat-panel panel ${tab === "chat" ? "mobile-show" : ""}`}
         >
-          <div className="panel-heading">
-            <h2>
-              <MessageCircle size={18} />
-              우리의 이야기
-            </h2>
-            <span className="subtle">서로를 존중하며 이야기해요</span>
-          </div>
-          <div
-            className="message-feed"
-            role="log"
-            aria-label="대화 내용"
-            aria-live="polite"
-            onScroll={(e) => {
-              const el = e.currentTarget;
-              stickToBottom.current =
-                el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-              if (stickToBottom.current) setNewMessages(false);
-            }}
-          >
-            <div className="chat-welcome">
-              <span>🌈</span>
-              <b>서로의 생각을 반갑게 맞이해요!</b>
-              <p>정답보다 소중한 건, 함께 나누는 과정이에요.</p>
-            </div>
-            {messages.map((m) => (
-              <article
-                id={"message-" + m.id}
-                key={m.id}
-                className={`message ${m.role === "ai" ? "ai-message" : ""} ${m.visibility !== "visible" ? "held-message" : ""}`}
-              >
-                <span className="avatar">{m.avatar}</span>
-                <div className="message-main">
-                  <div className="message-meta">
-                    <b>{m.nickname}</b>
-                    {m.role === "host" && (
-                      <span className="role-label">진행자</span>
-                    )}
-                    {m.role === "ai" && (
-                      <span className="role-label ai">AI 친구</span>
-                    )}
-                    <time>
-                      {new Date(m.created_at).toLocaleTimeString("ko-KR", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </time>
-                  </div>
-                  <div className="message-bubble">
-                    {m.stance && m.stance !== "neutral" && (
-                      <span className={"stance " + m.stance}>
-                        {m.stance === "for" ? "찬성 의견" : "반대 의견"}
-                      </span>
-                    )}
-                    {m.content}
-                  </div>
-                  {m.visibility !== "visible" && (
-                    <div className="held-label">
-                      {m.visibility === "held"
-                        ? `검토 대기 · ${m.safety_reason || ""}`
-                        : "숨긴 발언"}
-                      {isHost && (
-                        <button
-                          onClick={() =>
-                            mutate("message_visibility", {
-                              message_id: m.id,
-                              visibility: "visible",
-                            })
-                          }
-                        >
-                          공개하기
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  <div className="message-actions">
-                    {isHost && m.member_id && (
-                      <button
-                        onClick={() => {
-                          setSelected({ message: m, type: "praise" });
-                          setReason("");
-                        }}
-                      >
-                        <Star size={13} />
-                        칭찬하기
-                      </button>
-                    )}
-                    {isHost && m.visibility === "visible" && (
-                      <button
-                        onClick={() =>
-                          mutate("message_visibility", {
-                            message_id: m.id,
-                            visibility: "hidden",
-                          })
-                        }
-                      >
-                        <EyeOff size={13} />
-                        숨기기
-                      </button>
-                    )}
-                    {!isHost && m.visibility === "visible" && (
-                      <button
-                        onClick={() => {
-                          setSelected({ message: m, type: "report" });
-                          setReason("");
-                        }}
-                      >
-                        <Flag size={13} />
-                        신고
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </article>
-            ))}
-            {thinking && (
-              <div className="thinking">
-                <Mascot size={42} />
-                <span>
-                  이야기별이 생각을 모으고 있어요 <i>•••</i>
-                </span>
-              </div>
-            )}
-            <div ref={bottom} />
-          </div>
-          {newMessages && (
-            <button
-              className="new-messages"
-              onClick={() => {
-                stickToBottom.current = true;
-                bottom.current?.scrollIntoView({ behavior: "smooth" });
-                setNewMessages(false);
-              }}
-            >
-              새로운 이야기 보기 ↓
-            </button>
-          )}
+          <Plaza
+            data={data}
+            thinking={thinking}
+            busy={roundBusy}
+            onSpeaker={openSpeaker}
+            onLock={() => changeRound("round_control")}
+            onNext={() => setNextRound(true)}
+          />
           <form className="composer" onSubmit={send}>
             <div className="composer-options">
               <span>
                 <Smile size={16} />
-                따뜻한 한마디를 나눠요
+                {ask
+                  ? "이야기별에게 요청해요"
+                  : isHost
+                    ? "진행자의 이야기를 전해요"
+                    : `${room.round_number}번째 차례 · 한 번의 소중한 생각`}
               </span>
               {canAsk && (
                 <button
@@ -778,24 +829,32 @@ export function RoomView({
                     ? "대화방이 열리면 이야기할 수 있어요"
                     : me?.muted
                       ? "지금은 친구들의 이야기를 들어요"
-                      : ask
-                        ? "이야기별에게 궁금한 점을 물어보세요"
-                        : "나누고 싶은 생각을 적어 주세요…"
+                      : roundBlocked
+                        ? submitted
+                          ? "생각을 남겼어요. 다음 차례를 기다려 주세요"
+                          : "진행자가 발언을 열면 이야기할 수 있어요"
+                        : ask
+                          ? "이야기별에게 궁금한 점을 물어보세요"
+                          : "나누고 싶은 생각을 적어 주세요…"
                 }
                 maxLength={2000}
                 rows={2}
-                disabled={!active || !!me?.muted}
+                disabled={sendBlocked}
               />
               <button
                 className="send-button"
                 aria-label={ask ? "AI 요청 보내기" : "메시지 보내기"}
-                disabled={busy || !active || !!me?.muted || !text.trim()}
+                disabled={busy || sendBlocked || !text.trim()}
               >
                 <Send size={20} />
               </button>
             </div>
             <div className="composer-hint">
-              <span>Enter 전송 · Shift+Enter 줄바꿈</span>
+              <span>
+                {!isHost && !ask
+                  ? "발언은 고정돼요 · 다음 차례에 새 생각을 남겨요"
+                  : "Enter 전송 · Shift+Enter 줄바꿈"}
+              </span>
               <span>{text.length}/2000</span>
             </div>
           </form>
@@ -811,6 +870,39 @@ export function RoomView({
             </div>
             <Sparkles size={18} />
           </div>
+          {canAsk && (
+            <div className="ai-quick-actions" aria-label="이야기별에게 요청">
+              {[
+                [
+                  "진행 도와줘",
+                  "현재 차례의 대화를 자연스럽게 이어갈 진행 멘트를 제안해 줘.",
+                ],
+                [
+                  "요약해 줘",
+                  "지금까지의 주요 의견, 근거, 공통점과 차이를 정리해 줘.",
+                ],
+                [
+                  "질문 제안",
+                  "이번 차례에서 더 생각해 볼 질문 하나를 제안해 줘.",
+                ],
+              ].map(([label, prompt]) => (
+                <button
+                  key={label}
+                  disabled={!active || !data.aiEnabled || busy || !!me?.muted}
+                  onClick={async () => {
+                    setBusy(true);
+                    await mutate("ask_ai", {
+                      content: prompt,
+                      client_id: crypto.randomUUID(),
+                    });
+                    setBusy(false);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="side-tabs">
             <button
               className={side === "summary" ? "active" : ""}
@@ -990,6 +1082,155 @@ export function RoomView({
           </div>
         </aside>
       </main>
+      {speaker && (
+        <Modal
+          title={speakerName + "의 이야기 모음"}
+          close={() => setSpeaker(null)}
+        >
+          <p>
+            모든 차례의 발언을 차곡차곡 모았어요. 총 {historyMessages.length}개
+          </p>
+          <div className="speaker-history">
+            {!historyMessages.length && (
+              <div className="history-empty">
+                ☁️
+                <p>
+                  아직 공개된 발언이 없어요.
+                  <br />
+                  생각을 남기면 이곳에서 다시 볼 수 있어요.
+                </p>
+              </div>
+            )}
+            {historyMessages.map((m) => (
+              <article
+                id={"message-" + m.id}
+                key={m.id}
+                className={`message ${focusMessage === m.id ? "focused-message" : ""} ${m.role === "ai" ? "ai-message" : ""} ${m.visibility !== "visible" ? "held-message" : ""}`}
+              >
+                <span className="avatar">{m.avatar}</span>
+                <div className="message-main">
+                  <div className="message-meta">
+                    <b>{m.nickname}</b>
+                    {m.role === "host" && (
+                      <span className="role-label">진행자</span>
+                    )}
+                    {m.role === "ai" && (
+                      <span className="role-label ai">AI 친구</span>
+                    )}
+                    <span className="history-round">
+                      {m.round_number
+                        ? `${m.round_number}번째 차례`
+                        : "이전 기록"}
+                    </span>
+                    <time>
+                      {new Date(m.created_at).toLocaleTimeString("ko-KR", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </time>
+                  </div>
+                  <div className="message-bubble">
+                    {m.stance && m.stance !== "neutral" && (
+                      <span className={"stance " + m.stance}>
+                        {m.stance === "for" ? "찬성 의견" : "반대 의견"}
+                      </span>
+                    )}
+                    {m.content}
+                  </div>
+                  {m.visibility !== "visible" && (
+                    <div className="held-label">
+                      {m.visibility === "held"
+                        ? `검토 대기 · ${m.safety_reason || ""}`
+                        : "숨긴 발언"}
+                      {isHost && (
+                        <button
+                          onClick={() =>
+                            mutate("message_visibility", {
+                              message_id: m.id,
+                              visibility: "visible",
+                            })
+                          }
+                        >
+                          공개하기
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  <div className="message-actions">
+                    {isHost && m.member_id && (
+                      <button
+                        onClick={() => {
+                          setSelected({ message: m, type: "praise" });
+                          setReason("");
+                        }}
+                      >
+                        <Star size={13} />
+                        칭찬하기
+                      </button>
+                    )}
+                    {isHost && m.visibility === "visible" && (
+                      <button
+                        onClick={() =>
+                          mutate("message_visibility", {
+                            message_id: m.id,
+                            visibility: "hidden",
+                          })
+                        }
+                      >
+                        <EyeOff size={13} />
+                        숨기기
+                      </button>
+                    )}
+                    {!isHost && m.visibility === "visible" && (
+                      <button
+                        onClick={() => {
+                          setSelected({ message: m, type: "report" });
+                          setReason("");
+                        }}
+                      >
+                        <Flag size={13} />
+                        신고
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        </Modal>
+      )}
+      {nextRound && (
+        <Modal
+          title={room.round_number + 1 + "번째 차례를 열까요?"}
+          close={() => setNextRound(false)}
+        >
+          <p>
+            지금의 말풍선은 발언 기록에 보관하고, 모두가 한 번씩 다시 이야기할
+            수 있어요.
+          </p>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              changeRound("next_round");
+            }}
+          >
+            <label htmlFor="round-prompt">
+              이번에 함께 생각할 질문 <span className="subtle">(선택)</span>
+            </label>
+            <textarea
+              id="round-prompt"
+              rows={3}
+              value={roundPrompt}
+              onChange={(e) => setRoundPrompt(e.target.value)}
+              maxLength={500}
+              placeholder="예: 이 생각을 함께 실천하려면 무엇이 필요할까요?"
+            />
+            <button className="button primary full" disabled={roundBusy}>
+              {roundBusy ? "차례를 여는 중…" : "새 차례 열기"}
+            </button>
+          </form>
+        </Modal>
+      )}
       {selected && (
         <Modal
           title={

@@ -17,6 +17,9 @@ create table public.rooms (
  state text not null default 'draft' check(state in ('draft','active','paused','ended')),
  ai_mode text not null default 'balanced' check(ai_mode in ('off','quiet','balanced','active')),
  is_demo boolean not null default false,
+ round_number integer not null default 1 check(round_number > 0),
+ round_open boolean not null default true,
+ round_prompt text not null default '' check(char_length(round_prompt) <= 500),
  host_seen_at timestamptz not null default now(), created_at timestamptz not null default now(), ended_at timestamptz,
  summary_cursor bigint not null default 0, ai_error text, revision bigint not null default 0
 );
@@ -35,6 +38,7 @@ create table public.messages (
  content text not null check(char_length(content) between 1 and 2000), stance text check(stance in ('for','against','neutral')),
  visibility text not null default 'visible' check(visibility in ('visible','held','hidden')),
  safety_reason text, client_id uuid not null default gen_random_uuid(), created_at timestamptz not null default now(),
+ round_number integer check(round_number > 0),
  unique(room_id,client_id)
 );
 create table public.summaries (
@@ -69,6 +73,7 @@ create table public.ai_jobs (
 );
 create unique index one_pending_auto_job on public.ai_jobs(room_id) where kind='auto' and status in ('queued','running');
 create index messages_room_order on public.messages(room_id,id);
+create unique index one_member_speech_per_round on public.messages(room_id,member_id,round_number) where role='member' and round_number is not null;
 create index members_user on public.members(user_id,room_id);
 create index rooms_owner on public.rooms(owner_id);
 create index praise_room on public.praise(room_id,member_id);
@@ -172,6 +177,16 @@ begin
   if st not in ('active','paused','ended') then raise exception '잘못된 상태예요.'; end if;
   update public.rooms set state=st,host_seen_at=now(),ended_at=case when st='ended' then now() else ended_at end where id=r.id;
   if st<>'active' then update public.ai_jobs set status='cancelled' where room_id=r.id and status in ('queued','running'); end if;
+ elsif p_action in ('round_control','next_round') then
+  if not ishost then raise exception '진행자만 차례를 바꿀 수 있어요.'; end if;
+  if r.state<>'active' then raise exception '대화방을 먼저 열어 주세요.'; end if;
+  if (p->>'expected_round')::integer is distinct from r.round_number then raise exception '차례가 바뀌었어요. 새로 확인해 주세요.'; end if;
+  if p_action='next_round' then
+   update public.rooms set round_number=round_number+1,round_open=true,round_prompt=coalesce(trim(p->>'prompt'),'') where id=r.id;
+  else
+   if jsonb_typeof(p->'open') is distinct from 'boolean' then raise exception '발언 상태를 확인해 주세요.'; end if;
+   update public.rooms set round_open=(p->>'open')::boolean where id=r.id;
+  end if;
  elsif p_action='room_settings' then
   if not ishost then raise exception '진행자만 할 수 있어요.'; end if;
   update public.rooms set ai_mode=coalesce(p->>'ai_mode',ai_mode) where id=r.id;
@@ -196,8 +211,19 @@ begin
    if (select value from private.settings where key='ai_live_enabled') is distinct from 'true' and not r.is_demo then raise exception 'AI 연결 준비 중이에요. 일반 대화는 계속할 수 있어요.'; end if;
    insert into public.ai_jobs(room_id,kind,requested_by,prompt,request_id) values(r.id,'request',p_actor,p->>'content',(p->>'client_id')::uuid) on conflict(room_id,request_id) do nothing;
   else
-   insert into public.messages(room_id,user_id,member_id,role,nickname,avatar,content,stance,client_id,visibility,safety_reason)
-    values(r.id,p_actor,case when ishost then null else m.id end,case when ishost then 'host' else 'member' end,case when ishost then '진행자' else m.nickname end,case when ishost then '🌷' else m.avatar end,p->>'content',p->>'stance',(p->>'client_id')::uuid,coalesce(p->>'visibility','visible'),p->>'safety_reason')
+   -- A retry returns the original speech even if the host has advanced the round.
+   select * into msg from public.messages where room_id=r.id and client_id=(p->>'client_id')::uuid;
+   if msg.id is not null then
+    if msg.user_id is distinct from p_actor then raise exception '이미 사용된 요청이에요.'; end if;
+    return to_jsonb(msg);
+   end if;
+   if p ? 'expected_round' and (p->>'expected_round')::integer is distinct from r.round_number then raise exception '차례가 바뀌었어요. 내용을 확인하고 다시 보내 주세요.'; end if;
+   if not ishost then
+    if not r.round_open then raise exception '진행자가 발언을 열면 이야기할 수 있어요.'; end if;
+    if exists(select 1 from public.messages where room_id=r.id and member_id=m.id and round_number=r.round_number) then raise exception '이번 차례에는 이미 발언했어요. 다음 차례를 기다려 주세요.'; end if;
+   end if;
+   insert into public.messages(room_id,user_id,member_id,role,nickname,avatar,content,stance,client_id,visibility,safety_reason,round_number)
+    values(r.id,p_actor,case when ishost then null else m.id end,case when ishost then 'host' else 'member' end,case when ishost then '진행자' else m.nickname end,case when ishost then '🌷' else m.avatar end,p->>'content',p->>'stance',(p->>'client_id')::uuid,coalesce(p->>'visibility','visible'),p->>'safety_reason',r.round_number)
     on conflict(room_id,client_id) do nothing returning to_jsonb(messages.*) into outval;
   end if;
  elsif p_action='message_visibility' then

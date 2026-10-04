@@ -1,13 +1,4 @@
-export const AVATARS = [
-  "🐰",
-  "🐻",
-  "🐱",
-  "🐼",
-  "🐸",
-  "🦊",
-  "🐨",
-  "🐥",
-] as const;
+export { AVATARS } from "../../supabase/functions/story-api/avatars";
 export const KINDS = {
   discussion: "함께 토의",
   debate: "찬반 토론",
@@ -41,6 +32,9 @@ export type Room = {
   ai_error: string | null;
   revision: number;
   is_demo: boolean;
+  round_number: number;
+  round_open: boolean;
+  round_prompt: string;
 };
 export type Member = {
   id: string;
@@ -65,6 +59,7 @@ export type Message = {
   stance?: string;
   visibility: string;
   safety_reason?: string;
+  round_number?: number | null;
   created_at: string;
 };
 export type SummaryItem = { text: string; message_ids: number[] };
@@ -105,6 +100,7 @@ export type Snapshot = {
   }[];
   aiEnabled: boolean;
   myPoints: number;
+  myRoundSubmitted?: boolean;
 };
 export function csvCell(value: unknown) {
   let str = String(value ?? "");
@@ -112,15 +108,23 @@ export function csvCell(value: unknown) {
   return '"' + str.replaceAll('"', '""') + '"';
 }
 export function transcriptCsv(snapshot: Snapshot) {
-  const rows: unknown[][] = [["종류", "시간", "별명", "내용", "상태"]];
+  const rows: unknown[][] = [["종류", "시간", "별명", "내용", "상태", "차례"]];
   for (const m of snapshot.messages)
-    rows.push(["발언", m.created_at, m.nickname, m.content, m.visibility]);
+    rows.push([
+      "발언",
+      m.created_at,
+      m.nickname,
+      m.content,
+      m.visibility,
+      m.round_number ?? "이전 기록",
+    ]);
   if (snapshot.summary)
     rows.push([
       "AI 요약",
       snapshot.summary.created_at,
       "이야기별",
       JSON.stringify(snapshot.summary.content),
+      "",
       "",
     ]);
   for (const p of snapshot.praise)
@@ -130,6 +134,7 @@ export function transcriptCsv(snapshot: Snapshot) {
       snapshot.members.find((m) => m.id === p.member_id)?.nickname,
       `${CATEGORIES[p.category]}: ${p.reason}`,
       p.status,
+      "",
     ]);
   return "\uFEFF" + rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
 }

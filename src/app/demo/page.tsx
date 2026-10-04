@@ -18,6 +18,9 @@ const demo: Snapshot = {
     ai_error: null,
     revision: 0,
     is_demo: true,
+    round_number: 1,
+    round_open: true,
+    round_prompt: "우리 동네에서 함께 해 보고 싶은 작은 실천은?",
   },
   isHost: true,
   me: null,
@@ -55,6 +58,23 @@ const demo: Snapshot = {
       can_ask_ai: false,
       points: 0,
     },
+    ...[
+      ["d", "풀잎개구리", "🐸"],
+      ["e", "단풍여우", "🦊"],
+      ["f", "물방울고래", "🐳"],
+      ["g", "무지개유니콘", "🦄"],
+      ["h", "느긋거북이", "🐢"],
+    ].map(([id, nickname, avatar]) => ({
+      id,
+      user_id: id,
+      room_id: "demo",
+      nickname,
+      avatar,
+      state: "approved",
+      muted: false,
+      can_ask_ai: true,
+      points: 0,
+    })),
   ],
   messages: [
     {
@@ -67,6 +87,7 @@ const demo: Snapshot = {
       content:
         "반가워요! 오늘은 우리 동네를 더 행복하게 만드는 작은 실천에 대해 이야기해 볼까요? 🌱",
       visibility: "visible",
+      round_number: 1,
       created_at: now,
     },
     {
@@ -79,6 +100,7 @@ const demo: Snapshot = {
       content:
         "저는 동네 공원에 작은 꽃밭을 만들면 좋겠어요. 지나가는 사람들이 꽃을 보면 기분이 좋아질 것 같아요!",
       visibility: "visible",
+      round_number: 1,
       created_at: now,
     },
     {
@@ -91,6 +113,7 @@ const demo: Snapshot = {
       content:
         "좋은 생각이에요! 꽃을 심는 것도 좋지만, 먼저 공원에 있는 쓰레기를 함께 치우면 어떨까요?",
       visibility: "visible",
+      round_number: 1,
       created_at: now,
     },
     {
@@ -103,6 +126,7 @@ const demo: Snapshot = {
       content:
         "둘 다 할 수 있지 않을까요? 쓰레기를 줍고, 깨끗해진 자리에 꽃을 심는 거예요. 이름도 ‘우리 동네 꽃요일’로 해요!",
       visibility: "visible",
+      round_number: 1,
       created_at: now,
     },
     {
@@ -115,9 +139,11 @@ const demo: Snapshot = {
       content:
         "꽃밭 만들기와 공원 청소가 만나 멋진 아이디어가 되었네요! 함께 참여할 사람들은 어떻게 모으면 좋을까요?",
       visibility: "visible",
+      round_number: 1,
       created_at: now,
     },
   ],
+  myRoundSubmitted: false,
   summary: {
     created_at: now,
     content: {
