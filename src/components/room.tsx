@@ -65,8 +65,18 @@ export function RoomView({
   const [speaker, setSpeaker] = useState<Speaker | null>(null);
   const [focusMessage, setFocusMessage] = useState<number | null>(null);
   const [nextRound, setNextRound] = useState(false);
-  const [roundPrompt, setRoundPrompt] = useState("");
   const [roundBusy, setRoundBusy] = useState(false);
+  const topicRef = useRef<HTMLElement>(null);
+  const [topicHeight, setTopicHeight] = useState(100);
+  useEffect(() => {
+    const element = topicRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(() =>
+      setTopicHeight(Math.ceil(element.getBoundingClientRect().height)),
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [data?.room.id, waiting]);
   useEffect(() => {
     if (!speaker || !focusMessage) return;
     document
@@ -291,12 +301,12 @@ export function RoomView({
     const changed = await mutate(action, {
       expected_round: data.room.round_number,
       open: !data.room.round_open,
-      prompt: roundPrompt,
     });
     if (changed && action === "next_round") {
       setNextRound(false);
-      setRoundPrompt("");
-      setInfo("새 차례를 열었어요. 지난 발언은 캐릭터의 기록에 남아 있어요.");
+      setInfo(
+        "같은 주제로 대화를 이어가요. 자유로운 순서로 다시 이야기할 수 있어요.",
+      );
     }
     setRoundBusy(false);
   }
@@ -422,7 +432,10 @@ export function RoomView({
     ));
   }
   return (
-    <div className="room-app plaza-room">
+    <div
+      className="room-app plaza-room"
+      style={{ "--topic-height": `${topicHeight}px` } as React.CSSProperties}
+    >
       {celebrating && (
         <div className="point-celebration" role="status">
           ✦ 칭찬 별을 받았어요! ✦
@@ -516,7 +529,6 @@ export function RoomView({
             </span>
           </div>
           <h1>{room.title}</h1>
-          <p>{room.topic}</p>
         </div>
         <div className="room-top-actions">
           {isHost && (
@@ -544,6 +556,17 @@ export function RoomView({
               {active ? "잠시 멈춤" : "대화방 열기"}
             </button>
           )}
+        </div>
+      </section>
+      <section
+        ref={topicRef}
+        className="persistent-topic"
+        aria-label="계속 표시되는 토론 주제"
+      >
+        <MessageCircle size={20} aria-hidden="true" />
+        <div>
+          <b>함께 이야기하는 주제</b>
+          <p>{room.topic}</p>
         </div>
       </section>
       <div className="room-notices">
@@ -775,7 +798,7 @@ export function RoomView({
                   ? "이야기별에게 요청해요"
                   : isHost
                     ? "진행자의 이야기를 전해요"
-                    : `${room.round_number}번째 차례 · 한 번의 소중한 생각`}
+                    : `${room.round_number}번째 차례 · 친구의 말에 이어서 대화해요`}
               </span>
               {canAsk && (
                 <button
@@ -835,7 +858,7 @@ export function RoomView({
                           : "진행자가 발언을 열면 이야기할 수 있어요"
                         : ask
                           ? "이야기별에게 궁금한 점을 물어보세요"
-                          : "나누고 싶은 생각을 적어 주세요…"
+                          : "친구의 말에 이어 의견, 질문, 반론을 나눠 주세요…"
                 }
                 maxLength={2000}
                 rows={2}
@@ -852,7 +875,7 @@ export function RoomView({
             <div className="composer-hint">
               <span>
                 {!isHost && !ask
-                  ? "발언은 고정돼요 · 다음 차례에 새 생각을 남겨요"
+                  ? "같은 주제로 대화를 이어가요 · 지난 발언은 기록에 남아요"
                   : "Enter 전송 · Shift+Enter 줄바꿈"}
               </span>
               <span>{text.length}/2000</span>
@@ -1084,11 +1107,18 @@ export function RoomView({
       </main>
       {speaker && (
         <Modal
-          title={speakerName + "의 이야기 모음"}
+          title={
+            speaker.role === "all"
+              ? "함께 나눈 대화"
+              : speakerName + "의 이야기 모음"
+          }
           close={() => setSpeaker(null)}
         >
           <p>
-            모든 차례의 발언을 차곡차곡 모았어요. 총 {historyMessages.length}개
+            {speaker.role === "all"
+              ? "교사와 친구들이 주고받은 대화를 발언 순서대로 볼 수 있어요."
+              : "모든 차례의 발언을 차곡차곡 모았어요."}{" "}
+            총 {historyMessages.length}개
           </p>
           <div className="speaker-history">
             {!historyMessages.length && (
@@ -1201,12 +1231,12 @@ export function RoomView({
       )}
       {nextRound && (
         <Modal
-          title={room.round_number + 1 + "번째 차례를 열까요?"}
+          title="이어서 대화할 수 있도록 열까요?"
           close={() => setNextRound(false)}
         >
           <p>
-            지금의 말풍선은 발언 기록에 보관하고, 모두가 한 번씩 다시 이야기할
-            수 있어요.
+            같은 토론 주제로 대화를 이어갑니다. 친구의 의견에 답하거나, 질문하고
+            반론할 수 있도록 다음 발언 차례를 열어요.
           </p>
           <form
             onSubmit={(e) => {
@@ -1214,19 +1244,8 @@ export function RoomView({
               changeRound("next_round");
             }}
           >
-            <label htmlFor="round-prompt">
-              이번에 함께 생각할 질문 <span className="subtle">(선택)</span>
-            </label>
-            <textarea
-              id="round-prompt"
-              rows={3}
-              value={roundPrompt}
-              onChange={(e) => setRoundPrompt(e.target.value)}
-              maxLength={500}
-              placeholder="예: 이 생각을 함께 실천하려면 무엇이 필요할까요?"
-            />
             <button className="button primary full" disabled={roundBusy}>
-              {roundBusy ? "차례를 여는 중…" : "새 차례 열기"}
+              {roundBusy ? "차례를 여는 중…" : "다음 대화 열기"}
             </button>
           </form>
         </Modal>

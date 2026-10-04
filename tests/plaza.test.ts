@@ -4,7 +4,11 @@ import {
   AVATARS,
   AVATAR_CATALOG,
 } from "../supabase/functions/story-api/avatars";
-import { plazaSeats, roundMessage, speakerMessages } from "../src/lib/plaza";
+import {
+  plazaSeats,
+  speakerMessages,
+  latestVisibleMessage,
+} from "../src/lib/plaza";
 import type { Message } from "../src/lib/domain";
 test("all 50 named characters are distinct and retain the original avatars", () => {
   assert.equal(AVATARS.length, 50);
@@ -23,7 +27,7 @@ test("every occupancy through 30 seats has a distinct place and a reserved host"
     assert.ok(layout.members.every((s) => s.gridColumn <= layout.columns));
   }
 });
-test("fixed bubbles use this round's public speech; history keeps past rounds", () => {
+test("conversation retains the latest public speech across rounds and preserves chronological history", () => {
   const make = (
     id: number,
     round_number: number | null,
@@ -45,18 +49,27 @@ test("fixed bubbles use this round's public speech; history keeps past rounds", 
     make(4, 2, "hidden"),
     make(5, 2, "visible", "b"),
   ];
-  assert.equal(
-    roundMessage(messages, { role: "member", memberId: "a" }, 2),
-    undefined,
-  );
-  assert.equal(
-    roundMessage(messages, { role: "member", memberId: "b" }, 2)?.id,
-    5,
-  );
   assert.deepEqual(
     speakerMessages(messages, { role: "member", memberId: "a" }).map(
       (m) => m.id,
     ),
     [1, 2, 3, 4],
+  );
+  assert.equal(
+    latestVisibleMessage(messages, { role: "member", memberId: "a" })?.id,
+    2,
+  );
+  assert.equal(
+    latestVisibleMessage(messages, { role: "member", memberId: "b" })?.id,
+    5,
+  );
+  assert.deepEqual(
+    speakerMessages(messages, { role: "all" }).map((m) => m.id),
+    [1, 2, 3, 4, 5],
+  );
+  messages.push(make(6, 3));
+  assert.equal(
+    latestVisibleMessage(messages, { role: "member", memberId: "a" })?.id,
+    6,
   );
 });

@@ -20,7 +20,7 @@ const demo: Snapshot = {
     is_demo: true,
     round_number: 1,
     round_open: true,
-    round_prompt: "우리 동네에서 함께 해 보고 싶은 작은 실천은?",
+    round_prompt: "친구의 의견을 듣고, 동의하는 점이나 다른 생각을 이어서 말해요.",
   },
   isHost: true,
   me: null,

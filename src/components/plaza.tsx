@@ -9,7 +9,7 @@ import {
 import type { Snapshot } from "@/lib/domain";
 import {
   plazaSeats,
-  roundMessage,
+  latestVisibleMessage,
   speakerMessages,
   type Speaker,
 } from "@/lib/plaza";
@@ -42,11 +42,7 @@ export function Plaza({
   );
   if (data.myRoundSubmitted && me) spoken.add(me.id);
   const count = approved.filter((m) => spoken.has(m.id)).length;
-  const hostMessage = roundMessage(
-    messages,
-    { role: "host" },
-    room.round_number,
-  );
+  const hostMessage = latestVisibleMessage(messages, { role: "host" });
   const aiMessage = messages
     .filter((m) => m.role === "ai" && m.visibility === "visible")
     .at(-1);
@@ -65,11 +61,11 @@ export function Plaza({
         <div aria-live="polite">
           <b>
             {room.state === "active" && room.round_open
-              ? "생각을 모으고 있어요"
-              : "모인 생각을 함께 읽어요"}
+              ? "서로의 말에 이어 대화해요"
+              : "잠시 멈추고 서로의 이야기를 들어요"}
           </b>
           <span>
-            {count}/{approved.length}명 발언 · 한 차례에 한 번
+            자유로운 순서 · 이번 차례 {count}명 참여 · 진행자는 언제든 발언
           </span>
         </div>
         {isHost && (
@@ -85,7 +81,7 @@ export function Plaza({
               ) : (
                 <LockKeyholeOpen size={15} />
               )}
-              {room.round_open ? "발언 잠금" : "발언 다시 받기"}
+              {room.round_open ? "발언 잠금" : "대화 계속하기"}
             </button>
             <button
               type="button"
@@ -93,7 +89,7 @@ export function Plaza({
               onClick={onNext}
               disabled={busy || room.state !== "active"}
             >
-              다음 차례 <ArrowRight size={15} />
+              다음 대화 열기 <ArrowRight size={15} />
             </button>
           </div>
         )}
@@ -102,7 +98,7 @@ export function Plaza({
         <div className="round-question">
           <MessageCircle size={17} />
           <span>
-            이번 질문 <b>{room.round_prompt}</b>
+            진행 안내 <b>{room.round_prompt}</b>
           </span>
         </div>
       )}
@@ -137,7 +133,8 @@ export function Plaza({
           </button>
           {approved.map((member, i) => {
             const speaker: Speaker = { role: "member", memberId: member.id };
-            const message = roundMessage(messages, speaker, room.round_number);
+            const message = latestVisibleMessage(messages, speaker);
+            const isCurrent = message?.round_number === room.round_number;
             const history = speakerMessages(messages, speaker);
             const submitted = spoken.has(member.id);
             return (
@@ -152,13 +149,16 @@ export function Plaza({
                 <span
                   className={`seat-bubble ${!message ? "bubble-empty" : ""}`}
                 >
+                  {message && !isCurrent && (
+                    <em className="previous-speech">이전에 나눈 말</em>
+                  )}
                   <span>
                     {message?.content ||
                       (submitted
                         ? "진행자가 발언을 확인하고 있어요"
                         : member.muted
                           ? "친구들의 이야기를 듣고 있어요"
-                          : "어떤 생각을 나눌까요? ☁️")}
+                          : "친구의 이야기를 듣고 있어요 ☁️")}
                   </span>
                   {message && <small>전체 보기 ↗</small>}
                 </span>
@@ -171,11 +171,15 @@ export function Plaza({
                   {me?.id === member.id && <em>나</em>}
                 </b>
                 <small className="seat-status">
-                  {message
-                    ? "생각을 남겼어요"
+                  {isCurrent
+                    ? "이번 차례에 이야기했어요"
                     : submitted
                       ? "발언 확인 중"
-                      : "생각 모으는 중"}
+                      : room.state === "active" &&
+                          room.round_open &&
+                          !member.muted
+                        ? "이어서 이야기할 수 있어요"
+                        : "다음 발언을 기다려요"}
                 </small>
               </button>
             );
@@ -191,6 +195,9 @@ export function Plaza({
       </div>
       <div className="plaza-footer">
         <span>✦ 캐릭터를 누르면 모든 차례의 발언을 볼 수 있어요</span>
+        <button type="button" onClick={() => onSpeaker({ role: "all" })}>
+          대화 흐름 보기 ↗
+        </button>
         <span>{approved.length} / 30명</span>
       </div>
       <button

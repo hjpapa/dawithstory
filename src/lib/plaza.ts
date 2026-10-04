@@ -1,19 +1,19 @@
 import type { Message } from "./domain";
-export type Speaker = { role: "host" | "ai" | "member"; memberId?: string };
+export type Speaker = {
+  role: "host" | "ai" | "member" | "all";
+  memberId?: string;
+};
 export function speakerMessages(messages: Message[], speaker: Speaker) {
+  if (speaker.role === "all") return messages;
   return messages.filter((m) =>
     speaker.role === "member"
       ? m.member_id === speaker.memberId
       : m.role === speaker.role,
   );
 }
-export function roundMessage(
-  messages: Message[],
-  speaker: Speaker,
-  round: number,
-) {
+export function latestVisibleMessage(messages: Message[], speaker: Speaker) {
   return speakerMessages(messages, speaker)
-    .filter((m) => m.round_number === round && m.visibility === "visible")
+    .filter((message) => message.visibility === "visible")
     .at(-1);
 }
 // Membership order stays stable; a central seat is reserved for the host.
