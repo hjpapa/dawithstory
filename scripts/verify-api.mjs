@@ -32,18 +32,42 @@ async function call(action, p = {}, token, admin = false) {
   return { ok: res.ok, data, status: res.status };
 }
 if (mode === "setup") {
+  if (fs.existsSync(path)) throw new Error("Clean up existing API fixtures before setup.");
   const sessions = [];
   for (let i = 0; i < 3; i++) {
     const client = createClient(root, key, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
-    const { data, error } = await client.auth.signInAnonymously();
+    let signed;
+    if (i === 0) {
+      const origin = process.argv[3] || "https://dawithstory.vercel.app";
+      const email = `flow-check-${crypto.randomUUID()}@example.invalid`;
+      const password = crypto.randomUUID() + "aA!";
+      const registration = await fetch(origin + "/api/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: origin },
+        body: JSON.stringify({ email, password }),
+      });
+      assert.equal(registration.status, 200, "mail-free registration");
+      signed = await client.auth.signInWithPassword({ email, password });
+    } else {
+      signed = await client.auth.signInAnonymously();
+    }
+    const { data, error } = signed;
     if (error) throw error;
     sessions.push({
       id: data.user.id,
       token: data.session.access_token,
       refresh: data.session.refresh_token,
     });
+    // Persist each created identity so interrupted setup remains cleanable.
+    fs.writeFileSync(path, JSON.stringify({ sessions }, null, 2));
+    if (i === 0) {
+      const pending = await call("create_room", { title: "승인 전 검증", topic: "가상", kind: "discussion" }, data.session.access_token);
+      assert.equal(pending.ok, false);
+      const approval = await call("admin_profile", { user_id: data.user.id, status: "approved" }, null, true);
+      assert.equal(approval.ok, true, "operator approval");
+    }
   }
   fs.writeFileSync(path, JSON.stringify({ sessions }, null, 2));
   console.log(JSON.stringify({ fixtureUserIds: sessions.map((s) => s.id) }));
@@ -73,6 +97,13 @@ if (mode === "setup") {
     state.room = room;
     fs.writeFileSync(path, JSON.stringify(state, null, 2));
     await good("room_state", { room_id: room.id, state: "active" });
+    const heartbeat = setInterval(() => {
+      good("heartbeat", { room_id: room.id }).catch((error) => {
+        console.error("Host heartbeat failed:", error.message);
+        process.exitCode = 1;
+      });
+    }, 15000);
+    heartbeat.unref();
     const member = await good(
       "join",
       { code: room.code, nickname: "검증거북이", avatar: "🐢" },
@@ -267,6 +298,52 @@ if (mode === "setup") {
         code: room.code,
       }),
     );
+    clearInterval(heartbeat);
+  } else if (mode === "reconnect") {
+    await good("room_state", { room_id: state.room.id, state: "active" });
+    const client = createClient(root, key, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const restored = await client.auth.refreshSession({ refresh_token: guest.refresh });
+    assert.equal(restored.error, null);
+    guest.token = restored.data.session.access_token;
+    guest.refresh = restored.data.session.refresh_token;
+    fs.writeFileSync(path, JSON.stringify(state, null, 2));
+    const snap = await good("snapshot", { room_id: state.room.id }, guest.token);
+    assert.equal(snap.members.find((m) => m.id === state.member.id)?.state, "approved");
+    assert.equal(snap.myPoints, 1);
+    const content = "재접속 실시간 전달 검증 " + crypto.randomUUID();
+    let timer;
+    let received;
+    const delivery = new Promise((resolve) => { received = resolve; });
+    const channel = client.channel("verification:" + crypto.randomUUID()).on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "messages", filter: `room_id=eq.${state.room.id}` },
+      (event) => { if (event.new.content === content) received(true); },
+    );
+    try {
+      await new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Realtime subscription timeout")), 15000);
+        channel.subscribe((status) => {
+          if (status === "SUBSCRIBED") { clearTimeout(timer); resolve(); }
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") reject(new Error(status));
+        });
+      });
+      await good("message", { room_id: state.room.id, content, client_id: crypto.randomUUID() });
+      const delivered = await Promise.race([
+        delivery,
+        new Promise((resolve) => { timer = setTimeout(() => resolve(false), 15000); }),
+      ]);
+      assert.equal(delivered, true, "teacher speech must reach student over Realtime");
+      const praise = snap.praise.find((p) => p.status === "awarded" && p.member_id === state.member.id);
+      assert.ok(praise);
+      await good("praise_status", { room_id: state.room.id, praise_id: praise.id, status: "revoked" });
+      assert.equal((await good("snapshot", { room_id: state.room.id }, guest.token)).myPoints, 0);
+      console.log("PASS refreshed student keeps approval and points; live teacher message received; revoked point removed");
+    } finally {
+      clearTimeout(timer);
+      await client.removeAllChannels();
+    }
   } else if (mode === "ai") {
     await good("room_state", { room_id: state.room.id, state: "active" });
     const before = await good("snapshot", { room_id: state.room.id });
