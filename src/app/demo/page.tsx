@@ -20,7 +20,8 @@ const demo: Snapshot = {
     is_demo: true,
     round_number: 1,
     round_open: true,
-    round_prompt: "친구의 의견을 듣고, 동의하는 점이나 다른 생각을 이어서 말해요.",
+    round_prompt:
+      "친구의 의견을 듣고, 동의하는 점이나 다른 생각을 이어서 말해요.",
   },
   isHost: true,
   me: null,
@@ -34,7 +35,7 @@ const demo: Snapshot = {
       state: "approved",
       muted: false,
       can_ask_ai: false,
-      points: 1,
+      points: 0,
     },
     {
       id: "b",
@@ -171,6 +172,15 @@ const demo: Snapshot = {
     },
   },
   praise: [
+    {
+      id: "suggested-c",
+      member_id: "c",
+      message_id: 4,
+      category: "listening",
+      reason: "두 친구의 의견을 연결해서 함께 실천할 방법을 제안했어요.",
+      status: "suggested",
+      created_at: now,
+    },
     {
       id: "p",
       member_id: "b",

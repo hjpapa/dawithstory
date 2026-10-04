@@ -34,6 +34,7 @@ import {
 } from "@/lib/domain";
 import { Header, Loading, Mascot, Modal, Notice } from "./ui";
 import { Plaza } from "./plaza";
+import { PraiseBoard } from "./praise-board";
 import { PresenterPicker } from "./presenter-picker";
 import { speakerMessages, type Speaker } from "@/lib/plaza";
 import { AVATAR_CATALOG } from "../../supabase/functions/story-api/avatars";
@@ -61,6 +62,7 @@ export function RoomView({
     type: "praise" | "report";
   } | null>(null);
   const [reason, setReason] = useState("");
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
   const [category, setCategory] = useState("reason");
   const [confirm, setConfirm] = useState<"end" | "delete" | null>(null);
   const [speaker, setSpeaker] = useState<Speaker | null>(null);
@@ -102,6 +104,7 @@ export function RoomView({
       previousPoints.current = points;
       return () => clearTimeout(timer);
     }
+    setCelebrating(false);
     previousPoints.current = points;
   }, [data?.myPoints]);
   const refresh = useCallback(async () => {
@@ -185,6 +188,68 @@ export function RoomView({
     setError("");
     try {
       if (demo) {
+        if (["praise", "praise_status"].includes(action)) {
+          setData((d) => {
+            if (!d || !d.isHost) return d;
+            let cards = [...d.praise];
+            if (action === "praise_status")
+              cards = cards.map((p) =>
+                p.id === payload.praise_id
+                  ? { ...p, status: String(payload.status) }
+                  : p,
+              );
+            else {
+              const message = d.messages.find(
+                (m) =>
+                  m.id === payload.message_id &&
+                  m.visibility === "visible" &&
+                  m.member_id,
+              );
+              if (!message) return d;
+              const existing = cards.find(
+                (p) =>
+                  p.message_id === message.id &&
+                  p.category === payload.category,
+              );
+              if (existing)
+                cards = cards.map((p) =>
+                  p.id === existing.id
+                    ? {
+                        ...p,
+                        status: "awarded",
+                        reason: String(payload.reason),
+                      }
+                    : p,
+                );
+              else
+                cards.unshift({
+                  id: crypto.randomUUID(),
+                  member_id: message.member_id!,
+                  message_id: message.id,
+                  category: payload.category as keyof typeof CATEGORIES,
+                  reason: String(payload.reason),
+                  status: "awarded",
+                  created_at: new Date().toISOString(),
+                });
+            }
+            return {
+              ...d,
+              praise: cards,
+              members: d.members.map((m) => ({
+                ...m,
+                points: cards.filter(
+                  (p) => p.member_id === m.id && p.status === "awarded",
+                ).length,
+              })),
+              myPoints: d.me
+                ? cards.filter(
+                    (p) => p.member_id === d.me!.id && p.status === "awarded",
+                  ).length
+                : 0,
+            };
+          });
+          return true;
+        }
         if (
           [
             "next_round",
@@ -508,6 +573,11 @@ export function RoomView({
                   ...d,
                   isHost: !d.isHost,
                   me,
+                  myPoints: me
+                    ? d.praise.filter(
+                        (p) => p.member_id === me.id && p.status === "awarded",
+                      ).length
+                    : 0,
                   myRoundSubmitted:
                     !!me &&
                     d.messages.some(
@@ -1041,90 +1111,22 @@ export function RoomView({
                 )}
               </>
             ) : (
-              <>
-                {!isHost && (
-                  <div className="my-points">
-                    <Star fill="currentColor" />
-                    <span>나의 칭찬 별</span>
-                    <b>{data.myPoints}</b>
-                  </div>
-                )}
-                {praise
-                  .filter((p) =>
-                    isHost ? p.status !== "dismissed" : p.status === "awarded",
-                  )
-                  .map((p) => (
-                    <div key={p.id} className={"praise-card " + p.status}>
-                      <span className="praise-star">✦</span>
-                      <small>
-                        {p.status === "suggested"
-                          ? "이야기별의 칭찬 추천"
-                          : p.status === "revoked"
-                            ? "지급 취소"
-                            : "칭찬 별을 받았어요!"}
-                      </small>
-                      <h3>
-                        {members.find((m) => m.id === p.member_id)?.avatar}{" "}
-                        {members.find((m) => m.id === p.member_id)?.nickname}
-                      </h3>
-                      <b>{CATEGORIES[p.category]}</b>
-                      <p>{p.reason}</p>
-                      {isHost && (
-                        <div className="praise-actions">
-                          {p.status === "suggested" ? (
-                            <>
-                              <button
-                                className="button small primary"
-                                onClick={() =>
-                                  mutate("praise_status", {
-                                    praise_id: p.id,
-                                    status: "awarded",
-                                  })
-                                }
-                              >
-                                ⭐ 1점 주기
-                              </button>
-                              <button
-                                className="text-button"
-                                onClick={() =>
-                                  mutate("praise_status", {
-                                    praise_id: p.id,
-                                    status: "dismissed",
-                                  })
-                                }
-                              >
-                                넘기기
-                              </button>
-                            </>
-                          ) : p.status === "awarded" ? (
-                            <button
-                              className="text-button"
-                              onClick={() =>
-                                mutate("praise_status", {
-                                  praise_id: p.id,
-                                  status: "revoked",
-                                })
-                              }
-                            >
-                              지급 취소
-                            </button>
-                          ) : null}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                {praise.length === 0 && (
-                  <div className="small-empty">
-                    <span>🌟</span>
-                    <h3>따뜻한 칭찬을 기다려요</h3>
-                    <p>
-                      좋은 질문, 근거, 경청, 배려에
-                      <br />
-                      칭찬 별을 선물할 수 있어요.
-                    </p>
-                  </div>
-                )}
-              </>
+              <PraiseBoard
+                key={isHost ? "host" : "member"}
+                data={data}
+                change={(id, status) =>
+                  mutate("praise_status", { praise_id: id, status })
+                }
+                openMessage={(id) => {
+                  const message = messages.find((m) => m.id === id);
+                  if (message) {
+                    openSpeaker(
+                      { role: "member", memberId: message.member_id! },
+                      id,
+                    );
+                  }
+                }}
+              />
             )}
             {isHost && data.reports.length > 0 && (
               <section className="report-list">
@@ -1320,21 +1322,38 @@ export function RoomView({
               ? "따뜻한 칭찬을 선물해요"
               : "진행자에게 알려 주세요"
           }
-          close={() => setSelected(null)}
+          close={() => {
+            if (!feedbackBusy) setSelected(null);
+          }}
         >
           <blockquote>{selected.message.content}</blockquote>
           <Notice error>{error}</Notice>
           <form
             onSubmit={async (e) => {
               e.preventDefault();
-              if (
-                await mutate(selected.type === "praise" ? "praise" : "report", {
-                  message_id: selected.message.id,
-                  category,
-                  reason,
-                })
-              )
-                setSelected(null);
+              if (feedbackBusy) return;
+              setFeedbackBusy(true);
+              try {
+                if (
+                  await mutate(
+                    selected.type === "praise" ? "praise" : "report",
+                    {
+                      message_id: selected.message.id,
+                      category,
+                      reason,
+                    },
+                  )
+                ) {
+                  setInfo(
+                    selected.type === "praise"
+                      ? "칭찬 별 1점을 선물했어요. 칭찬 별의 지급 내역에서 확인하세요."
+                      : "진행자에게 전달했어요.",
+                  );
+                  setSelected(null);
+                }
+              } finally {
+                setFeedbackBusy(false);
+              }
             }}
           >
             {selected.type === "praise" && (
@@ -1365,7 +1384,10 @@ export function RoomView({
               value={reason}
               onChange={(e) => setReason(e.target.value)}
             />
-            <button className="button primary full">
+            <button
+              className="button primary full"
+              disabled={feedbackBusy || !reason.trim()}
+            >
               {selected.type === "praise"
                 ? "칭찬 별 1점 선물하기"
                 : "신고 보내기"}

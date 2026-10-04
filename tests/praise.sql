@@ -1,0 +1,31 @@
+begin;
+select set_config('request.jwt.claims','{"role":"service_role"}',true);
+do $$
+declare h uuid:=gen_random_uuid(); u uuid:=gen_random_uuid(); r uuid; m uuid; mid bigint; pid uuid; obj jsonb; denied boolean;
+begin
+ insert into auth.users(id,email,is_anonymous) values(h,'praise-host@example.invalid',false),(u,null,true);
+ insert into public.profiles(id,email,status) values(h,'praise-host@example.invalid','approved');
+ obj:=public.story_mutate(h,false,'create_room','{"title":"가상 칭찬 검증","topic":"가상","kind":"discussion"}'); r:=(obj->>'id')::uuid;
+ perform public.story_mutate(h,false,'room_state',jsonb_build_object('room_id',r,'state','active'));
+ obj:=public.story_mutate(u,false,'join',jsonb_build_object('code',obj->>'code','nickname','가상 토끼','avatar','🐰')); m:=(obj->>'id')::uuid;
+ perform public.story_mutate(h,false,'member',jsonb_build_object('room_id',r,'member_id',m,'state','approved'));
+ obj:=public.story_mutate(u,false,'message',jsonb_build_object('room_id',r,'content','친구 의견의 근거를 함께 살펴봐요.','client_id',gen_random_uuid())); mid:=(obj->>'id')::bigint;
+ insert into public.praise(room_id,member_id,message_id,category,reason,source) values(r,m,mid,'listening','친구 의견을 경청했어요.','ai') returning id into pid;
+ if exists(select 1 from public.praise where room_id=r and status='awarded') then raise exception 'recommendation awarded automatically'; end if;
+ denied:=false; begin perform public.story_mutate(u,false,'praise_status',jsonb_build_object('room_id',r,'praise_id',pid,'status','awarded')); exception when others then denied:=true; end;
+ if not denied then raise exception 'participant awarded points'; end if;
+ perform public.story_mutate(h,false,'praise_status',jsonb_build_object('room_id',r,'praise_id',pid,'status','awarded'));
+ perform public.story_mutate(h,false,'praise_status',jsonb_build_object('room_id',r,'praise_id',pid,'status','awarded'));
+ if (select count(*) from public.praise where room_id=r and status='awarded')<>1 then raise exception 'duplicate points'; end if;
+ perform public.story_mutate(h,false,'praise_status',jsonb_build_object('room_id',r,'praise_id',pid,'status','revoked'));
+ if exists(select 1 from public.praise where room_id=r and status='awarded') then raise exception 'revoke failed'; end if;
+ perform public.story_mutate(h,false,'praise_status',jsonb_build_object('room_id',r,'praise_id',pid,'status','awarded'));
+ update public.messages set visibility='hidden' where id=mid;
+ update public.praise set status='revoked' where id=pid;
+ denied:=false; begin perform public.story_mutate(h,false,'praise_status',jsonb_build_object('room_id',r,'praise_id',pid,'status','awarded')); exception when others then denied:=true; end;
+ if not denied then raise exception 'hidden speech re-awarded'; end if;
+ denied:=false; begin perform public.story_mutate(h,false,'praise',jsonb_build_object('room_id',r,'message_id',mid,'category','reason','reason','근거')); exception when others then denied:=true; end;
+ if not denied then raise exception 'hidden speech directly awarded'; end if;
+ raise notice 'PASS teacher-only awards, AI suggestion pending, duplicate award, revoke/re-award, hidden speech denied';
+end $$;
+rollback;
