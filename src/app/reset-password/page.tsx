@@ -1,42 +1,20 @@
-"use client";
-import { useState } from "react";
-import { supabase } from "@/lib/supabase";
+import Link from "next/link";
 import { Header, Notice, Back } from "@/components/ui";
 export default function Reset() {
-  const [password, setPassword] = useState("");
-  const [message, setMessage] = useState("");
   return (
     <>
       <Header />
       <main className="auth-page">
         <Back href="/login" />
         <section className="auth-card">
-          <h1>새 비밀번호</h1>
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              const { error } = await supabase().auth.updateUser({ password });
-              setMessage(
-                error
-                  ? "재설정 링크를 다시 확인해 주세요."
-                  : "비밀번호를 바꿨어요. 새 비밀번호로 로그인해 주세요.",
-              );
-            }}
-          >
-            <label htmlFor="new-password">새 비밀번호</label>
-            <input
-              id="new-password"
-              type="password"
-              minLength={8}
-              maxLength={128}
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="new-password"
-            />
-            <button className="button primary full">비밀번호 변경</button>
-            <Notice>{message}</Notice>
-          </form>
+          <h1>비밀번호 초기화 안내</h1>
+          <Notice>
+            가입한 아이디를 운영자에게 알려 주세요. 운영자가 본인 확인 후
+            비밀번호를 초기화해 드려요. 이메일 재설정 링크는 사용하지 않아요.
+          </Notice>
+          <Link href="/login" className="button primary full">
+            로그인으로 돌아가기
+          </Link>
         </section>
       </main>
     </>

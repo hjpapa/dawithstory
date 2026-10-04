@@ -386,6 +386,53 @@ Deno.serve(async (req) => {
     const adminToken = req.headers.get("x-story-admin");
     const admin =
       !!adminToken && (await hash(adminToken)) === config.backend_hash;
+    if (action === "register") {
+      if (!admin) return json({ error: "Forbidden" }, 403);
+      const email = safe(p.email, 254).toLowerCase();
+      if (
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+        typeof p.password !== "string" ||
+        p.password.length < 8 ||
+        p.password.length > 128
+      )
+        return json(
+          { error: "이메일 형식의 아이디와 8~128자 비밀번호를 입력해 주세요." },
+          400,
+        );
+      const allowed = check(
+        await db.rpc("story_rate_limit", {
+          p_key: "register:" + (await hash(safe(p.client_ip, 200))),
+          p_limit: 5,
+          p_seconds: 3600,
+        }),
+      );
+      if (!allowed)
+        return json(
+          { error: "가입 신청이 많아요. 잠시 후 다시 시도해 주세요." },
+          429,
+        );
+      const created = await db.auth.admin.createUser({
+        email,
+        password: p.password,
+        email_confirm: true,
+      });
+      if (created.error)
+        return json(
+          {
+            error:
+              "가입 신청을 완료하지 못했어요. 이미 신청했다면 로그인하거나 운영자에게 문의해 주세요.",
+          },
+          400,
+        );
+      const profile = await db
+        .from("profiles")
+        .insert({ id: created.data.user.id, email, status: "pending" });
+      if (profile.error) {
+        await db.auth.admin.deleteUser(created.data.user.id);
+        throw new Error("가입 신청을 저장하지 못했어요. 다시 시도해 주세요.");
+      }
+      return json({ ok: true });
+    }
     if (action === "worker") {
       if (
         (await hash(req.headers.get("x-story-worker") || "")) !==
@@ -420,6 +467,22 @@ Deno.serve(async (req) => {
       if (result.error || !result.data.user)
         return json({ error: "로그인이 만료됐어요. 다시 접속해 주세요." }, 401);
       user = result.data.user;
+      const claims = JSON.parse(
+        atob(bearer.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")),
+      );
+      if (
+        !uuid.test(claims.session_id || "") ||
+        !check(
+          await db.rpc("story_session_valid", {
+            p_user: user.id,
+            p_session: claims.session_id,
+          }),
+        )
+      )
+        return json(
+          { error: "로그인이 만료됐어요. 다시 로그인해 주세요." },
+          401,
+        );
     }
     if (action === "me") {
       if (admin) return json({ admin: true });
@@ -442,15 +505,54 @@ Deno.serve(async (req) => {
     if (
       action === "admin_overview" ||
       action === "admin_profile" ||
+      action === "admin_password" ||
       action === "admin_ai"
     ) {
       if (!admin) return json({ error: "운영자만 사용할 수 있어요." }, 403);
+      if (action === "admin_password") {
+        if (
+          !uuid.test(p.user_id || "") ||
+          typeof p.password !== "string" ||
+          p.password.length < 8 ||
+          p.password.length > 128
+        )
+          return json({ error: "8~128자 새 비밀번호를 입력해 주세요." }, 400);
+        const profile = check(
+          await db
+            .from("profiles")
+            .select("id")
+            .eq("id", p.user_id)
+            .maybeSingle(),
+        );
+        if (!profile)
+          return json({ error: "진행자 계정을 찾을 수 없어요." }, 404);
+        const result = await db.auth.admin.updateUserById(p.user_id, {
+          password: p.password,
+          email_confirm: true,
+        });
+        if (result.error)
+          return json(
+            {
+              error:
+                "비밀번호를 변경하지 못했어요. 다른 비밀번호로 다시 시도해 주세요.",
+            },
+            400,
+          );
+        check(await db.rpc("story_revoke_sessions", { p_user: p.user_id }));
+        return json({ ok: true });
+      }
       if (action === "admin_profile") {
         if (
           !uuid.test(p.user_id) ||
           !["approved", "suspended", "pending"].includes(p.status)
         )
           throw new Error("잘못된 요청이에요.");
+        if (p.status === "approved") {
+          const result = await db.auth.admin.updateUserById(p.user_id, {
+            email_confirm: true,
+          });
+          if (result.error) throw new Error("계정을 승인하지 못했어요.");
+        }
         check(
           await db
             .from("profiles")

@@ -19,7 +19,7 @@ npm run build
 ## 화면
 
 - `/`: 코드·별명·아바타로 참여 신청
-- `/login`: 진행자 가입, 로그인, 비밀번호 재설정 메일
+- `/login`: 진행자 가입 신청, 로그인, 운영자 비밀번호 초기화 안내
 - `/dashboard`: 가입 승인 상태, 대화방 생성·기록
 - `/room/[id]`: 캐릭터 토론 광장, 차례별 고정 말풍선, 개인 발언 기록, AI 노트, 참여 승인·관리, 칭찬 별, 신고, CSV
 - `/admin`: 운영자 `dawithstory` 전용 관리
@@ -72,12 +72,12 @@ OpenAI 키는 전용 스킬로 생성해 승인된 `.env.local`에 저장한 뒤
 
 현재 **실제 이용자 AI는 활성화되어 있습니다**. 운영자가 2026-10-04 필요한 데이터 처리 조건과 이용 안내·동의 절차를 확인했다고 응답하여 운영자 API로 활성화했습니다. 이는 운영자의 확인 기록이며 OpenAI 계정의 ZDR 설정을 별도로 감사했다는 의미는 아닙니다. 실제 API 검증에는 가상 발언만 사용합니다.
 
-1. **메일 발송:** Supabase의 사용자 정의 SMTP와 발신 도메인을 연결해야 일반 이용자의 이메일 인증·비밀번호 재설정 메일을 안정적으로 발송할 수 있습니다. 기본 메일 서비스만으로 공개 가입을 운영하지 마세요. 가입/재설정 화면과 콜백은 구현되어 있지만 외부 수신자 메일 배달은 검증하지 못했습니다.
-2. **인증 URL:** Supabase Authentication → URL Configuration의 Site URL과 Redirect URLs에 최종 운영 URL 및 `/auth/callback`을 등록합니다. 미리보기는 실제 사용하는 배포 URL을 등록합니다.
+1. **계정 관리:** 메일 인증 없이 이메일 형식의 아이디와 비밀번호로 가입을 신청합니다. 서버가 Supabase Auth 계정을 생성하고 승인 대기 프로필을 즉시 등록합니다. `/admin`에서 운영자가 본인을 확인하여 승인·정지·비밀번호 초기화를 관리합니다. 이메일 주소 소유권을 검증하지 않으며 메일·도메인·SMTP가 필요하지 않습니다. 운영자는 초기화한 비밀번호를 본인에게 안전한 별도 경로로 전달해야 합니다.
+2. **비밀번호 초기화:** 운영자만 서버의 `admin_password`를 호출할 수 있습니다. 비밀번호 변경 후 기존 세션을 폐기하고 진행 중인 방을 일시정지합니다. API와 방 데이터 읽기 정책 모두 폐기된 세션을 거절합니다. 초기화는 승인·정지 상태를 변경하지 않습니다. 기존 이메일 인증 대기 계정은 운영자 승인 또는 초기화로 로그인할 수 있습니다.
 3. **아동 데이터:** 운영자는 OpenAI Zero Data Retention 등 필요한 데이터 처리 조건, 이용 안내와 동의 절차를 유지해야 합니다. `store:false`는 ZDR의 대체가 아닙니다. 조건이 변경되면 `/admin`에서 AI 연결을 멈출 수 있습니다. 신규 설치는 기본적으로 AI가 꺼져 있으며 운영자 확인 후 활성화합니다.
 4. **실사용 부하:** 31건 동시 승인 API 요청 중 정확히 30건만 허용되는 검사를 통과했습니다. 실제 30개 브라우저를 통한 장시간 동시 이용 부하 검사는 별도로 남아 있습니다.
 
-실제 이용자 AI 활성화는 서버 운영 설정으로 적용되므로 별도 프런트엔드 재배포 없이 반영됩니다. 일반 이용자의 이메일 가입·재설정에는 위 메일 설정이 여전히 필요합니다. 유료 서비스의 비용/제공업체 제한은 앱 횟수 제한과 별개입니다.
+실제 이용자 AI 활성화는 서버 운영 설정으로 적용되므로 별도 프런트엔드 재배포 없이 반영됩니다. 계정 가입·초기화는 메일 발송 없이 운영자가 관리합니다. 유료 서비스의 비용/제공업체 제한은 앱 횟수 제한과 별개입니다.
 
 관련 공식 문서: [OpenAI 모델](https://developers.openai.com/api/docs/models/gpt-6-luna), [미성년자 대상 안내](https://developers.openai.com/api/docs/guides/safety-checks/under-18-api-guidance), [Supabase SMTP](https://supabase.com/docs/guides/auth/auth-smtp).
 
@@ -86,7 +86,7 @@ OpenAI 키는 전용 스킬로 생성해 승인된 `.env.local`에 저장한 뒤
 이미 연결된 프로젝트에는 적용되어 있습니다. 빈 프로젝트에 재설치할 때:
 
 1. `supabase/schema.sql` 적용
-2. `supabase/worker.sql`의 Edge URL을 해당 프로젝트 주소로 바꾸고 적용한 뒤 `supabase/usage.sql` 적용
+2. `supabase/worker.sql`의 Edge URL을 해당 프로젝트 주소로 바꾸고 적용한 뒤 `supabase/usage.sql`, `supabase/account-management.sql` 적용
 3. 서버 전용 비밀을 만들고 SHA-256 해시만 `private.settings.backend_hash`에 저장
 4. `story-api`의 `index.ts`, `provider.ts`, `avatars.ts` 배포. 플랫폼 JWT 검사는 끄되 함수 내 `auth.getUser()`와 운영자/워커 비밀 해시 검증을 유지
 5. `node scripts/provision.mjs`로 승인된 로컬 키를 Vault에 저장
@@ -112,3 +112,5 @@ OpenAI 키는 전용 스킬로 생성해 승인된 `.env.local`에 저장한 뒤
 ## 마스코트
 
 `public/star-mascot.png`는 이미지 생성 도구로 만든 투명 배경 일러스트입니다. 노란색의 둥글고 통통한 별이 파란 말풍선을 들고 있는 귀여운 점토 장난감 형태, 작은 눈과 미소, 부드러운 빛과 파스텔 색감을 지정했습니다. 인터페이스에 사진 업로드는 없습니다. 동작 줄이기 설정은 운영체제의 `prefers-reduced-motion`을 따릅니다.
+
+계정 관리 방식 전환 시 `supabase/account-management.sql`을 먼저 적용한 뒤 Edge Function과 웹 앱을 배포합니다. 가입 전용 `/api/register`는 서버에서만 계정 생성 권한을 사용하고 IP별 신청 횟수를 제한합니다. 일반 `/api/story` 경로에서는 `register`를 차단합니다.

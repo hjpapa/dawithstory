@@ -25,6 +25,15 @@ export default function Admin() {
   const [busy, setBusy] = useState(false);
   const [enable, setEnable] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
+  const [resetUser, setResetUser] = useState<{
+    id: string;
+    email: string;
+  } | null>(null);
+  const [newPassword, setNewPassword] = useState("");
+  const [repeatPassword, setRepeatPassword] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetError, setResetError] = useState("");
+  const [notice, setNotice] = useState("");
   const load = useCallback(async () => {
     try {
       setData(await api<AdminData>("admin_overview"));
@@ -150,6 +159,7 @@ export default function Admin() {
           </button>
         </div>
         <Notice error>{error}</Notice>
+        <Notice>{notice}</Notice>
         {data && (
           <>
             <div className="stats-grid">
@@ -170,8 +180,7 @@ export default function Admin() {
                 <span>AI 완료 요청 · 횟수 제한 없음</span>
                 <b>{data.usage.completed}</b>
                 <small>
-                  예상 비용 $
-                  {Number(data.usage.cost_usd).toFixed(4)}
+                  예상 비용 ${Number(data.usage.cost_usd).toFixed(4)}
                 </small>
               </article>
             </div>
@@ -208,7 +217,7 @@ export default function Admin() {
                   <table>
                     <thead>
                       <tr>
-                        <th>이메일</th>
+                        <th>아이디 (이메일 형식)</th>
                         <th>상태</th>
                         <th>관리</th>
                       </tr>
@@ -227,6 +236,18 @@ export default function Admin() {
                             </span>
                           </td>
                           <td>
+                            <button
+                              className="button small secondary"
+                              onClick={() => {
+                                setResetUser(p);
+                                setNewPassword("");
+                                setRepeatPassword("");
+                                setResetError("");
+                                setNotice("");
+                              }}
+                            >
+                              비밀번호 초기화
+                            </button>
                             {p.status !== "approved" && (
                               <button
                                 className="button small primary"
@@ -283,6 +304,78 @@ export default function Admin() {
           </>
         )}
       </main>
+      {resetUser && (
+        <Modal
+          title="진행자 비밀번호 초기화"
+          close={() => {
+            if (!resetBusy) {
+              setResetUser(null);
+              setNewPassword("");
+              setRepeatPassword("");
+            }
+          }}
+        >
+          <p>
+            <b>{resetUser.email}</b> 계정의 본인을 확인한 뒤 새 비밀번호를 정해
+            주세요. 기존 로그인은 해제되고 진행 중인 방은 일시정지돼요.
+          </p>
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (resetBusy) return;
+              if (newPassword !== repeatPassword) {
+                setResetError("두 비밀번호가 같지 않아요.");
+                return;
+              }
+              setResetBusy(true);
+              setResetError("");
+              try {
+                await api("admin_password", {
+                  user_id: resetUser.id,
+                  password: newPassword,
+                });
+                setNotice(
+                  `${resetUser.email}의 비밀번호를 초기화했어요. 새 비밀번호를 본인에게 안전하게 전달해 주세요.`,
+                );
+                setResetUser(null);
+                setNewPassword("");
+                setRepeatPassword("");
+              } catch (e) {
+                setResetError((e as Error).message);
+              } finally {
+                setResetBusy(false);
+              }
+            }}
+          >
+            <label htmlFor="reset-new">새 비밀번호</label>
+            <input
+              id="reset-new"
+              type="password"
+              autoComplete="new-password"
+              minLength={8}
+              maxLength={128}
+              required
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+            />
+            <label htmlFor="reset-repeat">새 비밀번호 확인</label>
+            <input
+              id="reset-repeat"
+              type="password"
+              autoComplete="new-password"
+              minLength={8}
+              maxLength={128}
+              required
+              value={repeatPassword}
+              onChange={(e) => setRepeatPassword(e.target.value)}
+            />
+            <Notice error>{resetError}</Notice>
+            <button className="button primary full" disabled={resetBusy}>
+              {resetBusy ? "변경 중이에요…" : "비밀번호 초기화하기"}
+            </button>
+          </form>
+        </Modal>
+      )}
       {enable && (
         <Modal title="실제 대화에 AI 연결하기" close={() => setEnable(false)}>
           <p>

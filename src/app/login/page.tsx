@@ -19,28 +19,18 @@ export default function Login() {
     try {
       const auth = supabase().auth;
       if (mode === "signup") {
-        const { data, error } = await auth.signUp({
-          email,
-          password,
-          options: {
-            emailRedirectTo: window.location.origin + "/auth/callback",
-          },
+        const response = await fetch("/api/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
         });
-        if (error) throw error;
-        if (data.session) {
-          await api("me");
-          router.push("/dashboard");
-        } else
-          setNotice(
-            "이메일로 받은 인증 링크를 열어 주세요. 첫 로그인 후 운영자가 가입을 승인해 드려요.",
-          );
-      } else if (mode === "reset") {
-        const { error } = await auth.resetPasswordForEmail(email, {
-          redirectTo:
-            window.location.origin + "/auth/callback?next=/reset-password",
-        });
-        if (error) throw error;
-        setNotice("가입된 이메일이라면 비밀번호 재설정 안내가 도착해요.");
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error);
+        setMode("login");
+        setPassword("");
+        setNotice(
+          "가입 신청이 완료됐어요. 운영자 승인 후 대화방을 만들 수 있어요. 입력한 아이디로 로그인해 주세요.",
+        );
       } else {
         const { error } = await auth.signInWithPassword({ email, password });
         if (error) throw error;
@@ -53,7 +43,7 @@ export default function Login() {
         msg.includes("Invalid login")
           ? "이메일과 비밀번호를 확인해 주세요."
           : msg.includes("Email not confirmed")
-            ? "이메일 인증을 먼저 완료해 주세요."
+            ? "운영자에게 계정 승인을 요청해 주세요."
             : msg.includes("rate limit")
               ? "요청이 잠시 많아요. 잠시 후 다시 시도해 주세요."
               : msg,
@@ -78,7 +68,7 @@ export default function Login() {
           </h1>
           <p>
             {mode === "signup"
-              ? "이메일 인증과 운영자 승인 후 시작할 수 있어요."
+              ? "메일 인증 없이 신청하고, 운영자 승인 후 시작해요."
               : "우리의 생각이 반짝이는 대화를 열어 주세요."}
           </p>
           {mode !== "reset" && (
@@ -105,50 +95,62 @@ export default function Login() {
               </button>
             </div>
           )}
-          <form onSubmit={submit}>
-            <label htmlFor="email">이메일</label>
-            <input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="hello@example.com"
-              required
-              autoComplete="email"
-            />
-            {mode !== "reset" && (
-              <>
-                <label htmlFor="password">비밀번호</label>
-                <input
-                  id="password"
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  minLength={8}
-                  maxLength={128}
-                  required
-                  autoComplete={
-                    mode === "signup" ? "new-password" : "current-password"
-                  }
-                  placeholder="8자 이상 입력해 주세요"
-                />
-              </>
-            )}
-            <Notice error>{error}</Notice>
-            <Notice>{notice}</Notice>
-            <button className="button primary full" disabled={busy}>
-              {busy
-                ? "잠시만 기다려 주세요…"
-                : mode === "login"
-                  ? "로그인하고 시작하기"
-                  : mode === "signup"
-                    ? "가입 신청하기"
-                    : "재설정 안내 받기"}
-            </button>
-          </form>
+          {mode === "reset" ? (
+            <Notice>
+              운영자에게 가입한 아이디를 알려 주고 비밀번호 초기화를 요청해
+              주세요. 운영자가 본인 확인 후 새 비밀번호를 전달해 드려요. 인증
+              메일은 발송하지 않아요.
+            </Notice>
+          ) : (
+            <form onSubmit={submit}>
+              <label htmlFor="email">아이디 (이메일 형식)</label>
+              <input
+                id="email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="hello@example.com"
+                required
+                autoComplete="email"
+              />
+              {
+                <>
+                  <label htmlFor="password">비밀번호</label>
+                  <input
+                    id="password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    minLength={8}
+                    maxLength={128}
+                    required
+                    autoComplete={
+                      mode === "signup" ? "new-password" : "current-password"
+                    }
+                    placeholder="8자 이상 입력해 주세요"
+                  />
+                </>
+              }
+              <Notice error>{error}</Notice>
+              <Notice>{notice}</Notice>
+              <button className="button primary full" disabled={busy}>
+                {busy
+                  ? "잠시만 기다려 주세요…"
+                  : mode === "login"
+                    ? "로그인하고 시작하기"
+                    : mode === "signup"
+                      ? "가입 신청하기"
+                      : "가입 신청하기"}
+              </button>
+            </form>
+          )}
           <button
             className="text-button"
-            onClick={() => setMode(mode === "reset" ? "login" : "reset")}
+            onClick={() => {
+              setMode(mode === "reset" ? "login" : "reset");
+              setError("");
+              setNotice("");
+            }}
           >
             {mode === "reset"
               ? "로그인으로 돌아가기"
