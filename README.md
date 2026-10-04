@@ -2,7 +2,7 @@
 
 귀여운 별 마스코트 **이야기별**과 함께하는 전 연령 토의·토론·일상 이야기 앱입니다.
 
-운영 주소: [dawithstory.vercel.app](https://dawithstory.vercel.app/). GitHub `hjpapa/dawithstory`의 `main` 브랜치에 연결합니다. 실제 이용자 AI는 데이터 처리 조건 확인 전까지 꺼진 상태로 유지합니다.
+운영 주소: [dawithstory.vercel.app](https://dawithstory.vercel.app/). GitHub `hjpapa/dawithstory`의 `main` 브랜치에 연결합니다. 2026-10-04 운영자의 데이터 처리 조건 확인을 받아 기존 키로 실제 이용자 AI를 활성화했습니다.
 
 ## 실행
 
@@ -70,14 +70,14 @@ OpenAI 키는 전용 스킬로 생성해 승인된 `.env.local`에 저장한 뒤
 
 ## 공개 운영 전 필요한 설정
 
-현재 **실제 이용자 AI는 꺼져 있습니다**. 실제 AI 검증은 가상 발언만 사용했습니다.
+현재 **실제 이용자 AI는 활성화되어 있습니다**. 운영자가 2026-10-04 필요한 데이터 처리 조건과 이용 안내·동의 절차를 확인했다고 응답하여 운영자 API로 활성화했습니다. 이는 운영자의 확인 기록이며 OpenAI 계정의 ZDR 설정을 별도로 감사했다는 의미는 아닙니다. 실제 API 검증에는 가상 발언만 사용합니다.
 
 1. **메일 발송:** Supabase의 사용자 정의 SMTP와 발신 도메인을 연결해야 일반 이용자의 이메일 인증·비밀번호 재설정 메일을 안정적으로 발송할 수 있습니다. 기본 메일 서비스만으로 공개 가입을 운영하지 마세요. 가입/재설정 화면과 콜백은 구현되어 있지만 외부 수신자 메일 배달은 검증하지 못했습니다.
 2. **인증 URL:** Supabase Authentication → URL Configuration의 Site URL과 Redirect URLs에 최종 운영 URL 및 `/auth/callback`을 등록합니다. 미리보기는 실제 사용하는 배포 URL을 등록합니다.
-3. **아동 데이터:** OpenAI Zero Data Retention 등 필요한 데이터 처리 조건, 이용 안내와 동의 절차를 확인합니다. `store:false`는 ZDR의 대체가 아닙니다. 조건이 갖춰진 뒤 `/admin`의 AI 연결 설정에서 활성화합니다.
+3. **아동 데이터:** 운영자는 OpenAI Zero Data Retention 등 필요한 데이터 처리 조건, 이용 안내와 동의 절차를 유지해야 합니다. `store:false`는 ZDR의 대체가 아닙니다. 조건이 변경되면 `/admin`에서 AI 연결을 멈출 수 있습니다. 신규 설치는 기본적으로 AI가 꺼져 있으며 운영자 확인 후 활성화합니다.
 4. **실사용 부하:** 31건 동시 승인 API 요청 중 정확히 30건만 허용되는 검사를 통과했습니다. 실제 30개 브라우저를 통한 장시간 동시 이용 부하 검사는 별도로 남아 있습니다.
 
-사용자의 운영 주소 배포 요청에 따라 앱을 운영 주소에 배포하되, 실제 이용자 AI는 꺼진 상태로 유지합니다. 일반 이용자의 이메일 가입·재설정과 AI 활성화 전에 위 설정을 완료해야 합니다. 유료 서비스의 비용/제공업체 제한은 앱 횟수 제한과 별개입니다.
+실제 이용자 AI 활성화는 서버 운영 설정으로 적용되므로 별도 프런트엔드 재배포 없이 반영됩니다. 일반 이용자의 이메일 가입·재설정에는 위 메일 설정이 여전히 필요합니다. 유료 서비스의 비용/제공업체 제한은 앱 횟수 제한과 별개입니다.
 
 관련 공식 문서: [OpenAI 모델](https://developers.openai.com/api/docs/models/gpt-6-luna), [미성년자 대상 안내](https://developers.openai.com/api/docs/guides/safety-checks/under-18-api-guidance), [Supabase SMTP](https://supabase.com/docs/guides/auth/auth-smtp).
 
