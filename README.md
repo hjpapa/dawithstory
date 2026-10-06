@@ -86,9 +86,9 @@ OpenAI 키는 전용 스킬로 생성해 승인된 `.env.local`에 저장한 뒤
 이미 연결된 프로젝트에는 적용되어 있습니다. 빈 프로젝트에 재설치할 때:
 
 1. `supabase/schema.sql` 적용
-2. `supabase/worker.sql`의 Edge URL을 해당 프로젝트 주소로 바꾸고 적용한 뒤 `supabase/usage.sql`, `supabase/account-management.sql` 적용
+2. `supabase/worker.sql`의 Edge URL을 해당 프로젝트 주소로 바꾸고 적용한 뒤 `supabase/usage.sql`, `supabase/account-management.sql`, `supabase/praise-validation.sql`, `supabase/reliability.sql`을 순서대로 적용
 3. 서버 전용 비밀을 만들고 SHA-256 해시만 `private.settings.backend_hash`에 저장
-4. `story-api`의 `index.ts`, `provider.ts`, `avatars.ts` 배포. 플랫폼 JWT 검사는 끄되 함수 내 `auth.getUser()`와 운영자/워커 비밀 해시 검증을 유지
+4. `story-api`의 `index.ts`, `provider.ts`, `avatars.ts`, `safety.ts` 배포. 플랫폼 JWT 검사는 끄되 함수 내 `auth.getUser()`와 운영자/워커 비밀 해시 검증을 유지
 5. `node scripts/provision.mjs`로 승인된 로컬 키를 Vault에 저장
 6. Vercel에 공개 Supabase URL/키, `STORY_SERVER_SECRET`, `STORY_ADMIN_PASSWORD_HASH`를 설정
 
@@ -124,3 +124,13 @@ OpenAI 키는 전용 스킬로 생성해 승인된 `.env.local`에 저장한 뒤
 `public/star-mascot.png`는 이미지 생성 도구로 만든 투명 배경 일러스트입니다. 노란색의 둥글고 통통한 별이 파란 말풍선을 들고 있는 귀여운 점토 장난감 형태, 작은 눈과 미소, 부드러운 빛과 파스텔 색감을 지정했습니다. 인터페이스에 사진 업로드는 없습니다. 동작 줄이기 설정은 운영체제의 `prefers-reduced-motion`을 따릅니다.
 
 계정 관리 방식 전환 시 `supabase/account-management.sql`을 먼저 적용한 뒤 Edge Function과 웹 앱을 배포합니다. 가입 전용 `/api/register`는 서버에서만 계정 생성 권한을 사용하고 IP별 신청 횟수를 제한합니다. 일반 `/api/story` 경로에서는 `register`를 차단합니다.
+
+## 2026-10-06 안정성 보완
+
+- `supabase/reliability.sql`을 적용한 뒤 Edge Function을 배포합니다. 발언의 공개 상태를 바꾸면 방의 기존 AI 답변을 숨기고 요약을 초기화합니다. 기존 AI 칭찬도 취소/보류 처리하며, 숨긴 AI 답변은 다시 공개할 수 없습니다. 이후 요약은 공개된 교사·참여자 원문으로 다시 생성합니다. 자동 정리가 꺼진 방은 직접 요청해야 합니다.
+- 운영자 AI 중지는 대기·실행 작업을 취소합니다. 완료 시에도 활성 상태와 작업 시도 번호를 검사하므로 재활성화하거나 재시도해도 과거 응답이 뒤늦게 게시되지 않습니다. 이미 제공업체로 전송한 요청의 처리·과금까지 취소하는 기능은 아닙니다.
+- 여러 방의 AI 요청은 현재 처리 가능한 방부터 선택합니다. 안전 검사 서비스의 429/5xx도 AI 작업 재시도 대상으로 처리합니다. 일반 발언은 외부 안전 검사 장애 시 기본 개인정보·위험 표현 검사를 유지하고 전달하며, 작성자와 진행자에게 검사 지연을 알립니다. 기본 검사는 외부 검사의 모든 탐지 범위를 대체하지 않습니다. AI 직접 요청과 생성 답변은 외부 검사 실패 시 게시하지 않습니다.
+- 첫 조회와 CSV는 전체 발언을 받습니다. 이후에는 새 발언만 병합하며, 변화가 없으면 목록을 생략합니다. 숨김/공개 변경 시 캐시를 초기화해 오래된 공개 발언이 남지 않게 합니다. 중복 조회를 직렬화하고 보조 조회 간격을 15초로 조정했습니다. 최초 전체 기록 조회의 페이지 UI는 후속 개선 대상입니다.
+- 칭찬 기록은 서버 조회 한도를 넘겨도 전체를 읽어 누적 점수와 CSV가 누락되지 않게 했습니다.
+- `tests/reliability.sql`은 숨김 파생 답변, 중지/재활성화, 오래된 작업 응답, 다른 방의 작업 진행을 롤백으로 검증합니다. 기존 DB·차례·발표·칭찬 검사와 단위 테스트 9개, TypeScript·운영 빌드도 통과했습니다.
+- `node scripts/verify-api.mjs setup` → `flow` → `ai` → `node scripts/verify-load.mjs`로 가상 교사 1명·참여자 30명을 검증했습니다. 30개 실시간 구독 모두 수신, 동시 조회 180건 오류 0건, p95 2,186ms, 최대 2,350ms였습니다. 새 발언만 전달하고 변경 없는 응답에서 목록을 생략하는 것도 확인했습니다. API/Realtime 연결 부하 결과이며 브라우저 30개의 장시간 렌더링 시험은 별도로 남습니다.

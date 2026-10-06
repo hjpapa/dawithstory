@@ -1,3 +1,4 @@
+import { safety, moderate, incomingSafety } from "./safety.ts";
 import { requestResponse } from "./provider.ts";
 import { AVATARS } from "./avatars.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.117.2";
@@ -27,38 +28,6 @@ async function hash(value: string) {
 function check(result: { data: any; error: any }) {
   if (result.error) throw new Error(result.error.message);
   return result.data;
-}
-function safety(text: string) {
-  if (
-    /(?:01[016789][ -]?\d{3,4}[ -]?\d{4}|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|\d{6}[ -]?[1-4]\d{6})/.test(
-      text,
-    )
-  )
-    return "연락처 등 개인정보가 포함되어 있을 수 있어요.";
-  if (
-    /(죽여버|죽여 버|자살|자해|강간|아동.{0,4}음란|씨발|시발놈|병신)/.test(text)
-  )
-    return "안전을 위해 진행자의 확인이 필요해요.";
-  return null;
-}
-async function moderate(key: string, text: string) {
-  const local = safety(text);
-  if (local) return local;
-  const res = await fetch("https://api.openai.com/v1/moderations", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ model: "omni-moderation-latest", input: text }),
-    signal: AbortSignal.timeout(12000),
-  });
-  if (!res.ok)
-    throw new Error("안전 확인이 지연되고 있어요. 잠시 후 다시 시도해 주세요.");
-  const data = await res.json();
-  return data.results?.some((r: any) => r.flagged)
-    ? "안전을 위해 진행자의 확인이 필요해요."
-    : null;
 }
 async function getRoomAccess(
   roomId: string,
@@ -97,13 +66,14 @@ async function getRoomAccess(
     throw new Error("이 대화방에 접근할 수 없어요.");
   return { room, isHost, me };
 }
-async function readMessages(roomId: string, host: boolean, all: boolean) {
+async function readMessages(roomId: string, host: boolean, after = 0) {
   let rows: any[] = [];
   for (let offset = 0; ; offset += 1000) {
     let query = db
       .from("messages")
       .select("*")
       .eq("room_id", roomId)
+      .gt("id", after)
       .order("id", { ascending: true })
       .range(offset, offset + 999);
     if (!host) query = query.eq("visibility", "visible");
@@ -114,22 +84,38 @@ async function readMessages(roomId: string, host: boolean, all: boolean) {
   }
   return { data: rows, error: null };
 }
+async function readPraise(roomId: string) {
+  const rows: any[] = [];
+  for (let offset = 0; ; offset += 1000) {
+    const batch = await db.from("praise").select("*").eq("room_id", roomId)
+      .order("created_at", { ascending: false }).order("id").range(offset, offset + 999);
+    if (batch.error) return batch;
+    rows.push(...batch.data);
+    if (batch.data.length < 1000) return { data: rows, error: null };
+  }
+}
 async function snapshot(
   roomId: string,
   actor: string | null,
   admin: boolean,
   config: any,
   exporting = false,
+  sync?: { after?: number; epoch?: number; host?: boolean; version?: string },
+  retry = true,
 ) {
-  await db.rpc("story_tick");
   const access = await getRoomAccess(roomId, actor, admin);
   const { room, isHost, me } = access;
+  const aiEnabled = config.ai_live_enabled === "true" || room.is_demo;
+  const version = JSON.stringify([room.revision, room.state, room.messages_epoch, room.ai_error, aiEnabled, isHost]);
+  const incremental = !exporting && sync?.epoch === room.messages_epoch && sync?.host === isHost && Number.isSafeInteger(sync?.after) && sync!.after! >= 0;
   if (!isHost && me.state === "waiting")
     return {
       room: { id: room.id, title: room.title, state: room.state },
       me,
       waiting: true,
     };
+  if (!exporting && incremental && sync?.version === version)
+    return { unchanged: true, version };
   const [
     membersResult,
     messagesResult,
@@ -140,7 +126,7 @@ async function snapshot(
     ownRoundResult,
   ] = await Promise.all([
     db.from("members").select("*").eq("room_id", roomId).order("created_at"),
-    readMessages(roomId, isHost, exporting),
+    readMessages(roomId, isHost, incremental ? sync!.after : 0),
     db
       .from("summaries")
       .select("*")
@@ -148,11 +134,7 @@ async function snapshot(
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle(),
-    db
-      .from("praise")
-      .select("*")
-      .eq("room_id", roomId)
-      .order("created_at", { ascending: false }),
+    readPraise(roomId),
     db
       .from("ai_jobs")
       .select("status,error,created_at")
@@ -178,11 +160,19 @@ async function snapshot(
   ]);
   const praises = check(praiseResult);
   const members = check(membersResult);
+  // A concurrent hide must never be merged into a cache with the old epoch.
+  const latest = check(await db.from("rooms").select("messages_epoch").eq("id", roomId).single());
+  if (latest.messages_epoch !== room.messages_epoch) {
+    if (retry) return snapshot(roomId, actor, admin, config, exporting, undefined, false);
+    throw new Error("대화가 변경되고 있어요. 잠시 후 다시 확인해 주세요.");
+  }
   const points = (id: string) =>
     praises.filter((p: any) => p.member_id === id && p.status === "awarded")
       .length;
   return {
     ...access,
+    version,
+    messagesReset: !incremental,
     canHeartbeat: !admin && room.owner_id === actor,
     members: members
       .filter((m: any) => isHost || m.state === "approved")
@@ -202,7 +192,7 @@ async function snapshot(
           .map((p: any) => ({ ...p, points: undefined })),
     jobs: check(jobsResult),
     reports: check(reportsResult),
-    aiEnabled: config.ai_live_enabled === "true" || room.is_demo,
+    aiEnabled,
     myPoints: me ? points(me.id) : 0,
     myRoundSubmitted: check(ownRoundResult).length > 0,
   };
@@ -279,6 +269,7 @@ async function processJobs() {
           .select("id,role,nickname,content,stance,round_number")
           .eq("room_id", room.id)
           .eq("visibility", "visible")
+          .in("role", ["host", "member"])
           .lte("id", job.through_message_id)
           .order("id", { ascending: false })
           .limit(80),
@@ -339,11 +330,12 @@ async function processJobs() {
       const blocked = await moderate(key, JSON.stringify(result));
       if (blocked) throw new Error("AI 답변을 안전 확인 과정에서 보류했어요.");
       check(
-        await db.rpc("story_complete_job", {
+        await db.rpc("story_finish_job", {
           p_id: job.id,
           p_result: result,
           p_input: response.usage?.input_tokens || 0,
           p_output: response.usage?.output_tokens || 0,
+          p_attempt: job.attempts,
         }),
       );
     } catch (error) {
@@ -355,7 +347,7 @@ async function processJobs() {
       const message = e.message?.startsWith("AI")
         ? e.message
         : "AI 응답이 지연되고 있어요. 다시 요청해 주세요.";
-      await db
+      const failed = await db
         .from("ai_jobs")
         .update({
           status: retry ? "queued" : "failed",
@@ -366,8 +358,10 @@ async function processJobs() {
           ).toISOString(),
         })
         .eq("id", job.id)
-        .eq("status", "running");
-      await db
+        .eq("attempts", job.attempts)
+        .eq("status", "running")
+        .select("id");
+      if (failed.data?.length) await db
         .from("rooms")
         .update({ ai_error: message })
         .eq("id", job.room_id);
@@ -643,7 +637,7 @@ Deno.serve(async (req) => {
       throw new Error("대화방 주소를 확인해 주세요.");
     if (action === "snapshot")
       return json(
-        await snapshot(p.room_id, user?.id || null, admin, config, !!p.export),
+        await snapshot(p.room_id, user?.id || null, admin, config, !!p.export, p.sync),
       );
     if (
       action === "create_room" &&
@@ -672,21 +666,12 @@ Deno.serve(async (req) => {
         throw new Error("발언 권한이 없어요.");
       if (action === "ask_ai" && !access.isHost && !access.me?.can_ask_ai)
         throw new Error("진행자가 AI 요청 권한을 주면 사용할 수 있어요.");
-      let reason = safety(p.content);
-      if (
-        !reason &&
-        (config.ai_live_enabled === "true" || access.room.is_demo)
-      ) {
-        const key = check(await db.rpc("story_ai_key"));
-        try {
-          reason = await moderate(key, p.content);
-        } catch {
-          reason = "안전 확인이 지연되어 진행자 검토를 기다리고 있어요.";
-        }
-      }
+      const key = (config.ai_live_enabled === "true" || access.room.is_demo)
+        ? check(await db.rpc("story_ai_key")) : null;
+      const { reason, degraded } = await incomingSafety(key, p.content, action === "ask_ai");
       if (action === "ask_ai" && reason) throw new Error(reason);
       p.visibility = reason ? "held" : "visible";
-      p.safety_reason = reason;
+      p.safety_reason = reason || (degraded ? "외부 안전 검사가 지연되어 기본 검사만 적용했어요. 진행자가 확인해 주세요." : null);
     }
     const allowedActions = [
       "create_room",

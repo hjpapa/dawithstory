@@ -48,6 +48,9 @@ export function RoomView({
   demo?: boolean;
 }) {
   const [data, setData] = useState<Snapshot | null>(initial || null);
+  const snapshotRef = useRef<Snapshot | null>(null);
+  const refreshInFlight = useRef<Promise<void> | null>(null);
+  const refreshAgain = useRef(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [waiting, setWaiting] = useState(false);
@@ -109,22 +112,62 @@ export function RoomView({
   }, [data?.myPoints]);
   const refresh = useCallback(async () => {
     if (demo) return;
+    if (refreshInFlight.current) {
+      refreshAgain.current = true;
+      return refreshInFlight.current;
+    }
+    const run = async () => {
+      do {
+        refreshAgain.current = false;
+        try {
+          const previous = snapshotRef.current;
+          const result = await api<Snapshot & { waiting?: boolean; unchanged?: boolean }>("snapshot", {
+            room_id: roomId,
+            ...(previous?.room.id === roomId && previous.messages ? {
+              sync: {
+                after: previous.messages.at(-1)?.id || 0,
+                epoch: previous.room.messages_epoch,
+                host: previous.isHost,
+                version: previous.version,
+              },
+            } : {}),
+          });
+          if (result.unchanged) {
+            setError("");
+            continue;
+          }
+          if (result.messagesReset === false && previous?.room.id === roomId) {
+            const messages = new Map(previous.messages.map((message) => [message.id, message]));
+            for (const message of result.messages) messages.set(message.id, message);
+            result.messages = [...messages.values()].sort((a, b) => a.id - b.id);
+          }
+          snapshotRef.current = result;
+          if (!result.isHost) {
+            setSelected((current) => current && !result.messages?.some(
+              (message) => message.id === current.message.id,
+            ) ? null : current);
+          }
+          setWaiting(!!result.waiting);
+          setData(result);
+          setError("");
+        } catch (e) {
+          setError((e as Error).message);
+          setData(null);
+          snapshotRef.current = null;
+        }
+      } while (refreshAgain.current);
+    };
+    refreshInFlight.current = run();
     try {
-      const result = await api<Snapshot & { waiting?: boolean }>("snapshot", {
-        room_id: roomId,
-      });
-      setWaiting(!!result.waiting);
-      setData(result);
-      setError("");
-    } catch (e) {
-      setError((e as Error).message);
-      setData(null);
+      await refreshInFlight.current;
+    } finally {
+      refreshInFlight.current = null;
     }
   }, [roomId, demo]);
   useEffect(() => {
     refresh();
     if (demo) return;
-    const interval = setInterval(refresh, 5000);
+    const interval = setInterval(refresh, 15000);
     let timeout: ReturnType<typeof setTimeout>;
     const channel = supabase()
       .channel("room:" + roomId)
@@ -356,7 +399,7 @@ export function RoomView({
         ]);
         if (pendingSend.current?.signature !== signature)
           pendingSend.current = { signature, id: crypto.randomUUID() };
-        const result = await api<{ visibility?: string }>(
+        const result = await api<{ visibility?: string; safety_reason?: string }>(
           ask ? "ask_ai" : "message",
           {
             room_id: roomId,
@@ -368,6 +411,8 @@ export function RoomView({
         );
         if (result.visibility === "held")
           setInfo("이 발언은 안전 확인을 위해 진행자 검토를 기다려요.");
+        else if (result.safety_reason)
+          setInfo("발언을 보냈어요. 외부 안전 검사가 지연되어 기본 검사를 적용했어요.");
         else if (ask) setInfo("이야기별에게 요청했어요. 잠시 기다려 주세요.");
         await refresh();
       }
@@ -1218,7 +1263,7 @@ export function RoomView({
                       {m.visibility === "held"
                         ? `검토 대기 · ${m.safety_reason || ""}`
                         : "숨긴 발언"}
-                      {isHost && (
+                      {isHost && !(m.role === "ai" && m.visibility === "hidden") && (
                         <button
                           onClick={() =>
                             mutate("message_visibility", {
@@ -1231,6 +1276,9 @@ export function RoomView({
                         </button>
                       )}
                     </div>
+                  )}
+                  {isHost && m.visibility === "visible" && m.safety_reason && (
+                    <div className="held-label">{m.safety_reason}</div>
                   )}
                   <div className="message-actions">
                     {isHost && m.member_id && (

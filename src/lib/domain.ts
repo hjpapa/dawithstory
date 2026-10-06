@@ -36,6 +36,7 @@ export type Room = {
   round_open: boolean;
   round_prompt: string;
   speaker_ids?: string[] | null;
+  messages_epoch?: number;
 };
 export type Member = {
   id: string;
@@ -84,6 +85,8 @@ export type Praise = {
   created_at: string;
 };
 export type Snapshot = {
+  version?: string;
+  messagesReset?: boolean;
   room: Room;
   me: Member | null;
   isHost: boolean;

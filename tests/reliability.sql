@@ -1,0 +1,37 @@
+begin;
+select set_config('request.jwt.claims','{"role":"service_role"}',true);
+do $$
+declare h uuid:=gen_random_uuid(); r uuid; r2 uuid; mid bigint; j uuid; j2 uuid; obj jsonb; result jsonb:='{"overview":"가상 요약","reply":"가상 답변","opinions":[],"agreements":[],"differences":[],"questions":[],"praise":[]}';
+begin
+ insert into auth.users(id,email,is_anonymous) values(h,'reliability@example.invalid',false);
+ insert into public.profiles(id,email,status) values(h,'reliability@example.invalid','approved');
+ insert into public.rooms(owner_id,title,topic,kind,state,is_demo,ai_mode) values(h,'검증 A','가상','discussion','active',true,'off') returning id into r;
+ insert into public.rooms(owner_id,title,topic,kind,state,is_demo,ai_mode) values(h,'검증 B','가상','discussion','active',true,'off') returning id into r2;
+ insert into public.messages(room_id,role,nickname,content) values(r,'host','교사','가상의 숨길 원문') returning id into mid;
+ insert into public.ai_jobs(room_id,kind,requested_by,status,attempts,through_message_id,leased_until) values(r,'request',h,'running',1,mid,now()+interval '120 seconds') returning id into j;
+ if not public.story_finish_job(j,result,10,10,1) then raise exception 'completion failed'; end if;
+ perform public.story_mutate(h,false,'message_visibility',jsonb_build_object('room_id',r,'message_id',mid,'visibility','hidden'));
+ if exists(select 1 from public.messages where room_id=r and visibility='visible') then raise exception 'hidden text derivative remained visible'; end if;
+ if exists(select 1 from public.summaries where room_id=r) then raise exception 'summary remained'; end if;
+ if (select messages_epoch from public.rooms where id=r)<>1 then raise exception 'cache epoch did not change'; end if;
+ update public.ai_jobs set status='running',attempts=2 where id=j;
+ if public.story_finish_job(j,result,10,10,1) then raise exception 'stale lease published'; end if;
+ perform public.story_set_config('{"ai_live_enabled":"false"}');
+ if (select status from public.ai_jobs where id=j)<>'cancelled' then raise exception 'disable did not cancel in-flight'; end if;
+ perform public.story_set_config('{"ai_live_enabled":"true"}');
+ if public.story_finish_job(j,result,10,10,2) then raise exception 're-enable resurrected cancelled work'; end if;
+ update public.rooms set is_demo=false where id=r;
+ update public.ai_jobs set status='running',attempts=3 where id=j;
+ update private.settings set value='false' where key='ai_live_enabled';
+ if public.story_finish_job(j,result,10,10,3) then raise exception 'completion ignored global disable'; end if;
+ update public.rooms set is_demo=true where id=r;
+ update public.ai_jobs set status='running',leased_until=now()+interval '120 seconds' where id=j;
+ insert into public.ai_jobs(room_id,kind,requested_by,status,created_at) values(r,'request',h,'queued','1900-01-01');
+ insert into public.ai_jobs(room_id,kind,requested_by,status,created_at) values(r2,'request',h,'queued','1900-01-02') returning id into j2;
+ obj:=public.story_claim_job();
+ if (obj->>'id')::uuid is distinct from j2 then raise exception 'busy room blocked runnable room'; end if;
+ if public.story_complete_job(j2,result,1,1) then raise exception 'legacy worker published'; end if;
+ if not public.story_finish_job(j2,result,10,10,(obj->>'attempts')::integer) then raise exception 'new worker failed'; end if;
+ raise notice 'PASS hidden derivatives, cache invalidation, global stop, re-enable, stale lease fencing, cross-room queue fairness';
+end $$;
+rollback;
