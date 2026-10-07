@@ -89,10 +89,12 @@ export function Modal({
   title,
   children,
   close,
+  className = "",
 }: {
   title: string;
   children: React.ReactNode;
   close: () => void;
+  className?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -100,7 +102,7 @@ export function Modal({
     return () => ref.current?.close();
   }, []);
   return (
-    <dialog ref={ref} className="modal" onCancel={close}>
+    <dialog ref={ref} className={`modal ${className}`} onCancel={close}>
       <div className="modal-heading">
         <h2>{title}</h2>
         <button type="button" className="icon-button" onClick={close} aria-label="닫기">

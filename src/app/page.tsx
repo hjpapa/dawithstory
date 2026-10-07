@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   Heart,
@@ -21,6 +21,14 @@ export default function Home() {
   const [avatar, setAvatar] = useState<string>("🐰");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [invited, setInvited] = useState(false);
+  useEffect(() => {
+    const invitation = new URLSearchParams(window.location.search).get("code")?.trim().toUpperCase();
+    if (invitation && /^[A-Z0-9]{8}$/.test(invitation)) {
+      setCode(invitation);
+      setInvited(true);
+    }
+  }, []);
   async function join(e: React.FormEvent) {
     e.preventDefault();
     setError("");
@@ -52,7 +60,7 @@ export default function Home() {
   return (
     <>
       <Header />
-      <main className="home">
+      <main className={`home ${invited ? "invited-home" : ""}`}>
         <section className="welcome-hero">
           <div className="hero-copy">
             <div className="eyebrow">
@@ -97,7 +105,7 @@ export default function Home() {
               </div>
             </div>
           </div>
-          <div className="join-card">
+          <div className="join-card" id="join">
             <div className="card-label">
               <span className="label-icon">
                 <MessageCircle size={20} />
@@ -105,7 +113,7 @@ export default function Home() {
               이야기 속으로 쏙!
             </div>
             <h2>함께 이야기할까요?</h2>
-            <p>초대 코드와 나만의 별명만 있으면 준비 끝!</p>
+            <p>{invited ? "초대 코드가 준비됐어요! 별명과 캐릭터를 골라 주세요." : "초대 코드와 나만의 별명만 있으면 준비 끝!"}</p>
             <form onSubmit={join}>
               <label htmlFor="code">
                 초대 코드 <span>진행자에게 받은 코드</span>

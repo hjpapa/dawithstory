@@ -4,7 +4,7 @@ import Link from "next/link";
 import {
   ArrowLeft,
   Check,
-  Copy,
+  QrCode,
   Download,
   EyeOff,
   Flag,
@@ -36,6 +36,7 @@ import { Header, Loading, Mascot, Modal, Notice } from "./ui";
 import { Plaza } from "./plaza";
 import { PraiseBoard } from "./praise-board";
 import { PresenterPicker } from "./presenter-picker";
+import { InviteDialog } from "./invite-dialog";
 import { speakerMessages, type Speaker } from "@/lib/plaza";
 import { AVATAR_CATALOG } from "../../supabase/functions/story-api/avatars";
 export function RoomView({
@@ -56,6 +57,7 @@ export function RoomView({
   const refreshAgain = useRef(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
+  const [inviteOrigin, setInviteOrigin] = useState<string | null>(null);
   const [waiting, setWaiting] = useState(false);
   const [text, setText] = useState("");
   const [ask, setAsk] = useState(false);
@@ -690,15 +692,12 @@ export function RoomView({
           {isHost && (
             <button
               className="code-chip"
-              title="초대 코드 복사"
-              onClick={async () => {
-                await navigator.clipboard.writeText(room.code);
-                setInfo("초대 코드를 복사했어요.");
-              }}
+              title="초대 코드 크게 보기 및 QR코드"
+              onClick={() => setInviteOrigin(window.location.origin)}
             >
               <small>초대 코드</small>
               <b>{room.code}</b>
-              <Copy size={16} />
+              <QrCode size={18} />
             </button>
           )}
           {isHost && room.state !== "ended" && (
@@ -1486,6 +1485,7 @@ export function RoomView({
           </div>
         </Modal>
       )}
+      {inviteOrigin && isHost && <InviteDialog key={room.code} room={room} origin={inviteOrigin} demo={demo} close={() => setInviteOrigin(null)} />}
     </div>
   );
 }
