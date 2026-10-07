@@ -61,7 +61,7 @@ async function getRoomAccess(
     : null;
   if (
     !isHost &&
-    (!me || ["kicked", "rejected"].includes(me.state) || room.state === "ended")
+    (!me || ["kicked", "rejected"].includes(me.state) || (room.state === "ended" && me.state !== "approved"))
   )
     throw new Error("이 대화방에 접근할 수 없어요.");
   return { room, isHost, me };
@@ -106,7 +106,25 @@ async function snapshot(
   const access = await getRoomAccess(roomId, actor, admin);
   const { room, isHost, me } = access;
   const aiEnabled = config.ai_live_enabled === "true" || room.is_demo;
-  const version = JSON.stringify([room.revision, room.state, room.messages_epoch, room.ai_error, aiEnabled, isHost]);
+  const reviewJob = room.state === "ended" ? check(await db.from("ai_jobs").select("status,error").eq("room_id", roomId).eq("kind", "final").order("created_at", { ascending: false }).limit(1).maybeSingle()) : null;
+  const version = JSON.stringify([room.revision, room.state, room.messages_epoch, room.ai_error, aiEnabled, isHost, reviewJob]);
+  if (room.state === "ended" && !isHost) {
+    if (!exporting && sync?.version === version) return {unchanged:true,version};
+    const [messages, summary, job, members] = await Promise.all([
+      readMessages(roomId, false),
+      db.from("summaries").select("content,created_at,is_final,through_message_id").eq("room_id", roomId).order("is_final", { ascending: false }).order("created_at", { ascending: false }).limit(1).maybeSingle(),
+      db.from("ai_jobs").select("status,error").eq("room_id", roomId).eq("kind", "final").order("created_at", { ascending: false }).limit(1).maybeSingle(),
+      db.from("members").select("id,nickname,avatar,state").eq("room_id", roomId).eq("state", "approved"),
+    ]);
+    const latest = check(await db.from("rooms").select("messages_epoch").eq("id", roomId).single());
+    if (latest.messages_epoch !== room.messages_epoch) {
+      if (retry) return snapshot(roomId, actor, admin, config, exporting, undefined, false);
+      throw new Error("대화가 변경되고 있어요. 다시 확인해 주세요.");
+    }
+    return { room, isHost, me, version, reviewOnly: true, reviewJob: check(job), aiEnabled,
+      messagesReset: true, messages: check(messages).map((m: any) => ({ id:m.id, room_id:m.room_id, role:m.role, member_id:m.member_id, nickname:m.nickname, avatar:m.avatar, content:m.content, stance:m.stance, visibility:m.visibility, round_number:m.round_number, created_at:m.created_at })),
+      members: check(members), summary: check(summary), praise: [], jobs: [], reports: [], myPoints: 0, canHeartbeat: false };
+  }
   const incremental = !exporting && sync?.epoch === room.messages_epoch && sync?.host === isHost && Number.isSafeInteger(sync?.after) && sync!.after! >= 0;
   if (!isHost && me.state === "waiting")
     return {
@@ -173,7 +191,8 @@ async function snapshot(
     ...access,
     version,
     messagesReset: !incremental,
-    canHeartbeat: !admin && room.owner_id === actor,
+    canHeartbeat: room.state !== "ended" && !admin && room.owner_id === actor,
+    reviewJob,
     members: members
       .filter((m: any) => isHost || m.state === "approved")
       .map((m: any) => ({
@@ -263,7 +282,9 @@ async function processJobs() {
           .eq("id", job.id);
         continue;
       }
-      const messages = check(
+      const messages = job.kind === "final"
+        ? check(await readMessages(room.id, false)).filter((m: any) => ["host", "member"].includes(m.role) && m.id <= job.through_message_id).map((m: any) => ({id:m.id,role:m.role,content:m.content,stance:m.stance,round_number:m.round_number}))
+        : check(
         await db
           .from("messages")
           .select("id,role,nickname,content,stance,round_number")
@@ -295,8 +316,8 @@ async function processJobs() {
           round_open: room.round_open,
           type: room.kind,
           mode: room.ai_mode,
-          request: job.kind === "request" ? job.prompt : null,
-          previous_summary: previous?.content,
+          request: job.kind === "final" ? "대화가 종료됐다. 제공된 전체 공개 발언을 바탕으로 최종 회고를 작성하라. 실제 합의와 제안을 구분하고 없는 결론을 만들지 마라. A4 한 장에 맞게 overview 200자, 의견 5개 각 100자, 공통점/차이 각각 3개 각 80자, 남은 질문 2개 각 80자 이내. reply는 빈 문자열, praise는 빈 배열." : job.kind === "request" ? job.prompt : null,
+          previous_summary: job.kind === "final" ? null : previous?.content,
           messages,
         }),
         text: {
@@ -341,7 +362,7 @@ async function processJobs() {
     } catch (error) {
       const e = error as Error & { retry?: boolean };
       const retry =
-        e.retry ||
+        (e.retry && (job.kind !== "final" || job.attempts < 4)) ||
         ((e.name === "TimeoutError" || e.name === "TypeError") &&
           job.attempts < 4);
       const message = e.message?.startsWith("AI")
@@ -679,6 +700,7 @@ Deno.serve(async (req) => {
       "heartbeat",
       "room_state",
       "room_settings",
+      "review_retry",
       "round_control",
       "next_round",
       "presentation_start",
@@ -704,7 +726,7 @@ Deno.serve(async (req) => {
         p,
       }),
     );
-    if (["message", "ask_ai", "room_state"].includes(action))
+    if (["message", "ask_ai", "room_state", "review_retry"].includes(action))
       EdgeRuntime.waitUntil(processJobs());
     return json(result);
   } catch (error) {

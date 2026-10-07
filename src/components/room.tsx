@@ -37,6 +37,7 @@ import { Plaza } from "./plaza";
 import { PraiseBoard } from "./praise-board";
 import { PresenterPicker } from "./presenter-picker";
 import { InviteDialog } from "./invite-dialog";
+import { DiscussionReview } from "./discussion-review";
 import { speakerMessages, type Speaker } from "@/lib/plaza";
 import { AVATAR_CATALOG } from "../../supabase/functions/story-api/avatars";
 export function RoomView({
@@ -64,6 +65,7 @@ export function RoomView({
   const [stance, setStance] = useState("neutral");
   const [tab, setTab] = useState("chat");
   const [side, setSide] = useState("summary");
+  const [reviewRecords, setReviewRecords] = useState(false);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<{
     message: Message;
@@ -522,6 +524,7 @@ export function RoomView({
         </main>
       </>
     );
+  if (data.room.state === "ended" && (!data.isHost || !reviewRecords)) return <DiscussionReview data={demo ? {...data, summary: data.summary ? {...data.summary, is_final: true} : null} : data} demo={demo} records={() => setReviewRecords(true)} retry={async () => {if (!await mutate("review_retry")) throw new Error("최종 요약을 요청하지 못했어요. AI 연결 상태를 확인하고 다시 시도해 주세요.");}} />;
   const { room, isHost, members, messages, summary, praise, me } = data;
   const canAsk = isHost || !!me?.can_ask_ai;
   const active = room.state === "active";
@@ -700,6 +703,7 @@ export function RoomView({
               <QrCode size={18} />
             </button>
           )}
+          {isHost && (room.state === "ended" ? <button className="button primary small" onClick={() => setReviewRecords(false)}>최종 정리 화면 보기</button> : <button className="button secondary small" onClick={() => setConfirm("end")}>대화 끝내고 정리하기</button>)}
           {isHost && room.state !== "ended" && (
             <button
               className={"button small " + (active ? "secondary" : "primary")}
@@ -754,10 +758,10 @@ export function RoomView({
         </button>
         <button
           className={tab === "summary" ? "active" : ""}
-          onClick={() => setTab("summary")}
+          onClick={() => { setTab("summary"); requestAnimationFrame(() => document.getElementById("conversation-summary")?.scrollIntoView({block:"start"})); }}
         >
           <Sparkles size={17} />
-          이야기별 정리
+            대화 요약
         </button>
         <button
           className={tab === "people" ? "active" : ""}
@@ -1044,13 +1048,14 @@ export function RoomView({
           </form>
         </section>
         <aside
+          id="conversation-summary"
           className={`summary-panel panel ${tab === "summary" ? "mobile-show" : ""}`}
         >
           <div className="summary-heading">
             <Mascot size={62} />
             <div>
-              <h2>이야기별의 노트</h2>
-              <p>우리의 생각을 차곡차곡</p>
+              <h2>대화 요약</h2>
+              <p>지금까지의 의견·공통점·차이를 정리해요</p>
             </div>
             <Sparkles size={18} />
           </div>
@@ -1092,7 +1097,7 @@ export function RoomView({
               className={side === "summary" ? "active" : ""}
               onClick={() => setSide("summary")}
             >
-              이야기 정리
+              지금까지의 요약
             </button>
             <button
               className={side === "praise" ? "active" : ""}
@@ -1454,7 +1459,7 @@ export function RoomView({
         >
           <p>
             {confirm === "end"
-              ? "참여자의 접속이 종료되고 기록은 90일 동안 보관돼요. 종료한 방은 다시 열 수 없어요."
+              ? "발언을 마치고, 승인된 참여자 모두가 대화 정리 화면으로 이동해요. 이야기별이 마지막 발언까지 최종 요약을 만들며 A4 한 장 PDF로 저장·출력할 수 있어요. AI가 중지되어 있으면 기존 정리를 보여줘요. 기록은 90일 동안 보관되며 종료한 방은 다시 열 수 없어요."
               : "발언, AI 요약, 포인트 기록이 함께 삭제되며 복구할 수 없어요."}
           </p>
           <Notice error>{error}</Notice>
@@ -1480,7 +1485,7 @@ export function RoomView({
                 }
               }}
             >
-              {confirm === "end" ? "이야기 마치기" : "삭제하기"}
+              {confirm === "end" ? "대화 끝내고 정리하기" : "삭제하기"}
             </button>
           </div>
         </Modal>

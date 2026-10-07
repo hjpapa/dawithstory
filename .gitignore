@@ -10,3 +10,4 @@ out/
 *.tsbuildinfo
 .test-artifacts/
 !.env.example
+supabase/.temp/

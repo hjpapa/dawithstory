@@ -10,10 +10,12 @@
     "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
+    "@pdf-lib/fontkit": "1.1.1",
     "@supabase/ssr": "0.12.7",
     "@supabase/supabase-js": "2.117.2",
     "lucide-react": "1.51.0",
     "next": "16.3.8",
+    "pdf-lib": "1.17.1",
     "qrcode.react": "4.2.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",

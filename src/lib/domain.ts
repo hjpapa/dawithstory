@@ -93,7 +93,9 @@ export type Snapshot = {
   canHeartbeat?: boolean;
   members: Member[];
   messages: Message[];
-  summary: { content: Summary; created_at: string } | null;
+  summary: { content: Summary; created_at: string; is_final?: boolean; through_message_id?: number } | null;
+  reviewOnly?: boolean;
+  reviewJob?: { status: string; error?: string } | null;
   praise: Praise[];
   jobs: { status: string; error?: string }[];
   reports: {
