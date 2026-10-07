@@ -9,5 +9,7 @@ node_modules/
 out/
 *.tsbuildinfo
 .test-artifacts/
+.playwright-cli/
+output/playwright/
 !.env.example
 supabase/.temp/

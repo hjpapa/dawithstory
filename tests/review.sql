@@ -26,7 +26,8 @@ begin
   perform public.story_mutate(h,false,'message',jsonb_build_object('room_id',r,'content','종료 후 발언','client_id',gen_random_uuid()));
   raise exception 'TEST post-end speech allowed';
  exception when others then if SQLERRM like 'TEST%' then raise; end if; end;
- perform set_config('request.jwt.claims',jsonb_build_object('role','authenticated','sub',guest)::text,true);
+ insert into auth.sessions(id,user_id) values(guest,guest);
+ perform set_config('request.jwt.claims',jsonb_build_object('role','authenticated','sub',guest,'session_id',guest)::text,true);
  if not private.can_read_review(r) then raise exception 'approved review access denied'; end if;
  update public.members set state='kicked' where room_id=r;
  if private.can_read_review(r) then raise exception 'kicked review access allowed'; end if;

@@ -39,6 +39,7 @@ import { PresenterPicker } from "./presenter-picker";
 import { InviteDialog } from "./invite-dialog";
 import { DiscussionReview } from "./discussion-review";
 import { speakerMessages, type Speaker } from "@/lib/plaza";
+import { aiRequestAllowed, clearSentDraft } from "@/lib/composer";
 import { AVATAR_CATALOG } from "../../supabase/functions/story-api/avatars";
 export function RoomView({
   roomId,
@@ -98,7 +99,7 @@ export function RoomView({
       ?.scrollIntoView({ block: "nearest" });
   }, [speaker, focusMessage]);
   useEffect(() => {
-    if (data && !data.isHost && (!data.me?.can_ask_ai || !data.aiEnabled))
+    if (data && !aiRequestAllowed(data))
       setAsk(false);
   }, [data?.isHost, data?.me?.can_ask_ai, data?.aiEnabled]);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -423,7 +424,7 @@ export function RoomView({
         else if (ask) setInfo("이야기별에게 요청했어요. 잠시 기다려 주세요.");
         await refresh();
       }
-      setText("");
+      setText((current) => clearSentDraft(current, text));
       pendingSend.current = null;
       input.current?.focus();
     } catch (e) {

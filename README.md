@@ -63,7 +63,8 @@ npm run build
 - 직접 요청은 진행자 또는 권한을 받은 참여자만 가능합니다. 권한은 작업 실행·완료 시에도 검사합니다.
 - 앱의 요청 횟수·비용 한도는 없습니다. 제공업체 속도 제한과 장애에는 작업 상태를 유지하고 재시도합니다.
 - 발언·요청은 UUID로 중복 제거합니다. 작업 완료는 원자적으로 저장하며 요약·AI 발언·칭찬 추천의 중복을 막습니다.
-- 자동 요약은 최근 발언 최대 80개와 이전 요약을 사용합니다. 장기간 대화의 모든 발언을 매 요청마다 원문 그대로 보내지는 않습니다.
+- 자동 요약은 미처리 공개 발언을 오래된 순서로 최대 80개씩 처리하고 이전 요약과 연결합니다. 처리한 범위까지만 커서를 이동하며 남은 발언은 다음 작업으로 이어집니다. 새 발언이 없는 직접 요청은 최근 발언을 참고합니다.
+- AI 생성 응답의 사용량은 파싱·안전 검사·게시 전에 시도별로 기록합니다. 재시도와 취소된 생성도 합산하고 같은 시도의 중복 저장은 차단합니다. 과거에 기록되지 않았던 사용량이나 제공업체 응답 자체를 받지 못한 호출 비용은 복원할 수 없습니다.
 - AI 칭찬은 추천일 뿐이며 진행자가 승인해야 1점이 지급됩니다. 순위표가 없습니다.
 
 OpenAI 키는 전용 스킬로 생성해 승인된 `.env.local`에 저장한 뒤 **Supabase Vault**에 암호화 저장했습니다. Vercel 클라이언트나 브라우저에는 전달하지 않습니다. `store:false`를 사용합니다.
@@ -86,9 +87,9 @@ OpenAI 키는 전용 스킬로 생성해 승인된 `.env.local`에 저장한 뒤
 이미 연결된 프로젝트에는 적용되어 있습니다. 빈 프로젝트에 재설치할 때:
 
 1. `supabase/schema.sql` 적용
-2. `supabase/worker.sql`의 Edge URL을 해당 프로젝트 주소로 바꾸고 적용한 뒤 `supabase/usage.sql`, `supabase/account-management.sql`, `supabase/praise-validation.sql`, `supabase/reliability.sql`을 순서대로 적용
+2. `supabase/worker.sql`의 Edge URL을 해당 프로젝트 주소로 바꾸고 적용한 뒤 `supabase/usage.sql`, `supabase/account-management.sql`, `supabase/praise-validation.sql`, `supabase/reliability.sql`, `supabase/migrations/*.sql`을 파일명 시간순으로 적용
 3. 서버 전용 비밀을 만들고 SHA-256 해시만 `private.settings.backend_hash`에 저장
-4. `story-api`의 `index.ts`, `provider.ts`, `avatars.ts`, `safety.ts` 배포. 플랫폼 JWT 검사는 끄되 함수 내 `auth.getUser()`와 운영자/워커 비밀 해시 검증을 유지
+4. `story-api`의 `index.ts`, `worker.ts`, `provider.ts`, `avatars.ts`, `safety.ts` 배포. 플랫폼 JWT 검사는 끄되 함수 내 `auth.getUser()`와 운영자/워커 비밀 해시 검증을 유지
 5. `node scripts/provision.mjs`로 승인된 로컬 키를 Vault에 저장
 6. Vercel에 공개 Supabase URL/키, `STORY_SERVER_SECRET`, `STORY_ADMIN_PASSWORD_HASH`를 설정
 
@@ -98,6 +99,8 @@ OpenAI 키는 전용 스킬로 생성해 승인된 `.env.local`에 저장한 뒤
 
 ## 검증 기록
 
+- `npm test`는 로컬 PostgreSQL 엔진(PGlite)에 실제 스키마·마이그레이션을 적용합니다. 폐기 세션/타인 명단 직접 조회 차단, 기존 30명 정원·권한·숨김·90일 보존 SQL, 165개 발언의 80/80/5 배치 처리, 안전 검사 실패·재시도·취소 사용량을 모의 제공업체로 검증합니다. 운영 데이터나 OpenAI 비용이 필요하지 않습니다.
+- 실제 Chromium 입력 화면에서 전송 대기 중 새 초안 보존, 운영자 AI 중지 후 진행자 일반 발언 복귀를 가상 API 응답으로 검증했습니다.
 - TypeScript 검사, Next.js 운영 빌드 통과
 - 광장: 50종 캐릭터·30명 좌석·현재 차례 말풍선 테스트, `tests/plaza.sql`의 차례 잠금·소유권·중복 발언·기록 보존·101회 AI 요청 검사 통과. 실제 API의 동시 발언 3건 중 1건만 저장됨을 확인했습니다.
 - CSV 수식 주입/인용/한글, 모의 제공업체 요청 101회, 429·5xx 재시도 분류 테스트 통과
