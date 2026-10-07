@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Shield, Users, MessageCircle, Sparkles, LogOut } from "lucide-react";
-import { api } from "@/lib/supabase";
+import { adminApi as api } from "@/lib/supabase";
 import { STATES, type Room } from "@/lib/domain";
 import { Header, Mascot, Notice, Loading, Modal } from "@/components/ui";
 type AdminData = {
@@ -286,7 +286,7 @@ export default function Admin() {
               <h2>전체 대화방</h2>
               <div className="admin-rooms">
                 {data.rooms.map((r) => (
-                  <Link key={r.id} href={"/room/" + r.id}>
+                  <Link key={r.id} href={"/room/" + r.id + "?view=admin"}>
                     <span>
                       {r.title}
                       <small>{r.topic}</small>

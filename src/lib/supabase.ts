@@ -11,6 +11,7 @@ export function supabase() {
 export async function api<T = Record<string, unknown>>(
   action: string,
   payload: Record<string, unknown> = {},
+  scope: "user" | "admin" = "user",
 ): Promise<T> {
   const {
     data: { session },
@@ -19,6 +20,7 @@ export async function api<T = Record<string, unknown>>(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "X-Story-Scope": scope,
       ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}),
     },
     body: JSON.stringify({ action, ...payload }),
@@ -28,4 +30,10 @@ export async function api<T = Record<string, unknown>>(
   });
   if (!res.ok) throw new Error(data.error || "잠시 후 다시 시도해 주세요.");
   return data as T;
+}
+export function adminApi<T = Record<string, unknown>>(
+  action: string,
+  payload: Record<string, unknown> = {},
+): Promise<T> {
+  return api<T>(action, payload, "admin");
 }

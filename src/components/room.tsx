@@ -22,7 +22,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { api, supabase } from "@/lib/supabase";
+import { api as userApi, adminApi, supabase } from "@/lib/supabase";
 import {
   CATEGORIES,
   KINDS,
@@ -42,11 +42,14 @@ export function RoomView({
   roomId,
   initial,
   demo = false,
+  adminView = false,
 }: {
   roomId: string;
   initial?: Snapshot;
   demo?: boolean;
+  adminView?: boolean;
 }) {
+  const api = adminView ? adminApi : userApi;
   const [data, setData] = useState<Snapshot | null>(initial || null);
   const snapshotRef = useRef<Snapshot | null>(null);
   const refreshInFlight = useRef<Promise<void> | null>(null);
@@ -163,7 +166,7 @@ export function RoomView({
     } finally {
       refreshInFlight.current = null;
     }
-  }, [roomId, demo]);
+  }, [roomId, demo, api]);
   useEffect(() => {
     refresh();
     if (demo) return;
@@ -223,7 +226,7 @@ export function RoomView({
     beat();
     const id = setInterval(beat, 15000);
     return () => clearInterval(id);
-  }, [data?.isHost, data?.canHeartbeat, roomId, demo]);
+  }, [data?.isHost, data?.canHeartbeat, roomId, demo, api]);
   async function mutate(
     action: string,
     payload: Record<string, unknown> = {},

@@ -25,7 +25,12 @@ export async function POST(req: NextRequest) {
         { error: "허용되지 않은 요청이에요." },
         { status: 403 },
       );
-    const admin = await isAdmin();
+    const admin = req.headers.get("x-story-scope") === "admin";
+    if (admin && !(await isAdmin()))
+      return NextResponse.json(
+        { error: "운영자 로그인이 필요해요." },
+        { status: 401 },
+      );
     const upstream = await fetch(
       `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/story-api`,
       {

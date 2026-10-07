@@ -32,7 +32,7 @@ export default function Login() {
           "가입 신청이 완료됐어요. 운영자 승인 후 대화방을 만들 수 있어요. 입력한 아이디로 로그인해 주세요.",
         );
       } else {
-        const { error } = await auth.signInWithPassword({ email, password });
+        const { error } = await auth.signInWithPassword({ email: email.trim().toLowerCase(), password });
         if (error) throw error;
         await api("me");
         router.push("/dashboard");
