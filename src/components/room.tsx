@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
+import type { RealtimeChannel, RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -45,6 +45,16 @@ import { RoundOpinions } from "./round-opinions";
 import { speakerMessages, type Speaker } from "@/lib/plaza";
 import { aiRequestAllowed, clearSentDraft } from "@/lib/composer";
 import { AVATAR_CATALOG } from "../../supabase/functions/story-api/avatars";
+
+type RoomVersion = Pick<Room, "revision" | "state" | "messages_epoch" | "ai_error">;
+
+function sameRoomVersion(left: RoomVersion, right: RoomVersion) {
+  return left.revision === right.revision &&
+    left.state === right.state &&
+    left.messages_epoch === right.messages_epoch &&
+    left.ai_error === right.ai_error;
+}
+
 export function RoomView({
   roomId,
   initial,
@@ -200,62 +210,91 @@ export function RoomView({
   useEffect(() => {
     refresh();
     if (demo) return;
+    const client = supabase();
     const interval = setInterval(refresh, 14000 + Math.random() * 2000);
-    let timeout: ReturnType<typeof setTimeout>;
+    let disposed = false;
+    let channel: RealtimeChannel | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     const scheduleRefresh = () => {
-      clearTimeout(timeout);
-      timeout = setTimeout(refresh, 100);
+      if (disposed || timeout !== undefined) return;
+      timeout = setTimeout(() => {
+        timeout = undefined;
+        void refresh();
+      }, 100);
     };
-    const channel = supabase()
-      .channel("room:" + roomId)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "rooms",
-          filter: `id=eq.${roomId}`,
-        },
-        ({ eventType, new: changedRoom }: RealtimePostgresChangesPayload<Room>) => {
-          const current = snapshotRef.current?.room;
-          // Heartbeats change host_seen_at without changing what the room displays.
-          if (
-            eventType === "UPDATE" && current?.id === roomId &&
-            changedRoom.revision === current.revision &&
-            changedRoom.state === current.state &&
-            changedRoom.messages_epoch === current.messages_epoch &&
-            changedRoom.ai_error === current.ai_error
-          ) return;
-          scheduleRefresh();
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "members",
-          filter: `room_id=eq.${roomId}`,
-        },
-        scheduleRefresh,
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "messages",
-          filter: `room_id=eq.${roomId}`,
-        },
-        scheduleRefresh,
-      )
-      .subscribe();
+    const subscribe = async () => {
+      const { data: { session } } = await client.auth.getSession();
+      if (!session || disposed) return;
+      await client.realtime.setAuth(session.access_token);
+      if (disposed) return;
+      channel = client
+        .channel("room:" + roomId, {
+          config: { postgres_changes_options: { wait: true } },
+        })
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "rooms", filter: `id=eq.${roomId}` },
+          ({ eventType, new: changedRoom }: RealtimePostgresChangesPayload<Room>) => {
+            const current = snapshotRef.current?.room;
+            // A heartbeat updates host_seen_at without changing the displayed room.
+            if (eventType === "UPDATE" && current?.id === roomId && sameRoomVersion(changedRoom, current))
+              return;
+            scheduleRefresh();
+          },
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "members", filter: `room_id=eq.${roomId}` },
+          scheduleRefresh,
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "messages", filter: `room_id=eq.${roomId}` },
+          scheduleRefresh,
+        )
+        .subscribe((status: string) => {
+          if (status === "SUBSCRIBED") scheduleRefresh();
+        });
+    };
+    void subscribe().catch(() => {});
     return () => {
+      disposed = true;
       clearInterval(interval);
       clearTimeout(timeout);
-      supabase().removeChannel(channel);
+      if (channel) void client.removeChannel(channel);
     };
   }, [refresh, roomId, demo]);
+  const probeRoomChanges = !demo && data?.canHeartbeat === true && data.room.state === "active" &&
+    data.members.some((member) => member.state === "approved");
+  useEffect(() => {
+    if (!probeRoomChanges) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    // If Realtime is slow, one lightweight RLS-protected lookup per teacher
+    // detects new activity without requesting a full snapshot on every tick.
+    const probe = async () => {
+      try {
+        if (document.hidden || refreshInFlight.current) return;
+        const { data: version, error } = await supabase()
+          .from("rooms")
+          .select("revision,state,messages_epoch,ai_error")
+          .eq("id", roomId)
+          .maybeSingle();
+        const current = snapshotRef.current?.room;
+        if (!disposed && !error && current?.id === roomId &&
+          (!version || !sameRoomVersion(version, current))) void refresh();
+      } catch {
+        // The regular snapshot remains available when the version lookup fails.
+      } finally {
+        if (!disposed) timer = setTimeout(probe, 2000);
+      }
+    };
+    timer = setTimeout(probe, 2000);
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+  }, [probeRoomChanges, refresh, roomId]);
   useEffect(() => {
     if (!data?.isHost || data.canHeartbeat === false || demo) return;
     const beat = () => api("heartbeat", { room_id: roomId }).catch(() => {});
