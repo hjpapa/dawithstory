@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -11,6 +12,7 @@ import {
   Heart,
   MessageCircle,
   Pause,
+  Pencil,
   Play,
   RefreshCw,
   Send,
@@ -29,6 +31,7 @@ import {
   STATES,
   transcriptCsv,
   type Message,
+  type Room,
   type Snapshot,
   type SummaryItem,
 } from "@/lib/domain";
@@ -38,6 +41,7 @@ import { PraiseBoard } from "./praise-board";
 import { PresenterPicker } from "./presenter-picker";
 import { InviteDialog } from "./invite-dialog";
 import { DiscussionReview } from "./discussion-review";
+import { RoundOpinions } from "./round-opinions";
 import { speakerMessages, type Speaker } from "@/lib/plaza";
 import { aiRequestAllowed, clearSentDraft } from "@/lib/composer";
 import { AVATAR_CATALOG } from "../../supabase/functions/story-api/avatars";
@@ -55,19 +59,31 @@ export function RoomView({
   const api = adminView ? adminApi : userApi;
   const [data, setData] = useState<Snapshot | null>(initial || null);
   const snapshotRef = useRef<Snapshot | null>(null);
+  const confirmedRoom = useRef<Pick<Room, "id" | "revision"> | null>(null);
   const refreshInFlight = useRef<Promise<void> | null>(null);
   const refreshAgain = useRef(false);
   const [error, setError] = useState("");
+  const [sendError, setSendError] = useState("");
   const [info, setInfo] = useState("");
   const [inviteOrigin, setInviteOrigin] = useState<string | null>(null);
   const [waiting, setWaiting] = useState(false);
   const [text, setText] = useState("");
   const [ask, setAsk] = useState(false);
   const [stance, setStance] = useState("neutral");
+  const [editDraft, setEditDraft] = useState<{
+    original: Message;
+    content: string;
+    stance: string;
+  } | null>(null);
+  const [pendingOpinion, setPendingOpinion] = useState<{
+    content: string;
+    edit: boolean;
+  } | null>(null);
   const [tab, setTab] = useState("chat");
   const [side, setSide] = useState("summary");
   const [reviewRecords, setReviewRecords] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [summaryBusy, setSummaryBusy] = useState(false);
   const [selected, setSelected] = useState<{
     message: Message;
     type: "praise" | "report";
@@ -77,6 +93,7 @@ export function RoomView({
   const [category, setCategory] = useState("reason");
   const [confirm, setConfirm] = useState<"end" | "delete" | null>(null);
   const [speaker, setSpeaker] = useState<Speaker | null>(null);
+  const [roundOpinions, setRoundOpinions] = useState(false);
   const [focusMessage, setFocusMessage] = useState<number | null>(null);
   const [nextRound, setNextRound] = useState(false);
   const [roundBusy, setRoundBusy] = useState(false);
@@ -144,17 +161,25 @@ export function RoomView({
             setError("");
             continue;
           }
+          if (
+            !result.waiting &&
+            confirmedRoom.current?.id === result.room.id &&
+            result.room.revision < confirmedRoom.current.revision
+          ) continue;
           if (result.messagesReset === false && previous?.room.id === roomId) {
             const messages = new Map(previous.messages.map((message) => [message.id, message]));
             for (const message of result.messages) messages.set(message.id, message);
             result.messages = [...messages.values()].sort((a, b) => a.id - b.id);
           }
           snapshotRef.current = result;
-          if (!result.isHost) {
-            setSelected((current) => current && !result.messages?.some(
-              (message) => message.id === current.message.id,
-            ) ? null : current);
-          }
+          setSelected((current) => {
+            if (!current) return null;
+            const latest = result.messages?.find((message) => message.id === current.message.id);
+            if (!latest) return result.isHost ? current : null;
+            return (latest.edit_client_id ?? null) === (current.message.edit_client_id ?? null)
+              ? current
+              : null;
+          });
           setWaiting(!!result.waiting);
           setData(result);
           setError("");
@@ -175,8 +200,12 @@ export function RoomView({
   useEffect(() => {
     refresh();
     if (demo) return;
-    const interval = setInterval(refresh, 15000);
+    const interval = setInterval(refresh, 14000 + Math.random() * 2000);
     let timeout: ReturnType<typeof setTimeout>;
+    const scheduleRefresh = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(refresh, 100);
+    };
     const channel = supabase()
       .channel("room:" + roomId)
       .on(
@@ -187,9 +216,17 @@ export function RoomView({
           table: "rooms",
           filter: `id=eq.${roomId}`,
         },
-        () => {
-          clearTimeout(timeout);
-          timeout = setTimeout(refresh, 100);
+        ({ eventType, new: changedRoom }: RealtimePostgresChangesPayload<Room>) => {
+          const current = snapshotRef.current?.room;
+          // Heartbeats change host_seen_at without changing what the room displays.
+          if (
+            eventType === "UPDATE" && current?.id === roomId &&
+            changedRoom.revision === current.revision &&
+            changedRoom.state === current.state &&
+            changedRoom.messages_epoch === current.messages_epoch &&
+            changedRoom.ai_error === current.ai_error
+          ) return;
+          scheduleRefresh();
         },
       )
       .on(
@@ -200,10 +237,7 @@ export function RoomView({
           table: "members",
           filter: `room_id=eq.${roomId}`,
         },
-        () => {
-          clearTimeout(timeout);
-          timeout = setTimeout(refresh, 100);
-        },
+        scheduleRefresh,
       )
       .on(
         "postgres_changes",
@@ -213,10 +247,7 @@ export function RoomView({
           table: "messages",
           filter: `room_id=eq.${roomId}`,
         },
-        () => {
-          clearTimeout(timeout);
-          timeout = setTimeout(refresh, 100);
-        },
+        scheduleRefresh,
       )
       .subscribe();
     return () => {
@@ -239,6 +270,33 @@ export function RoomView({
     setError("");
     try {
       if (demo) {
+        if (action === "request_summary" || action === "review_retry") {
+          setData((d) => {
+            if (!d || !d.isHost) return d;
+            const opinions = d.messages.filter(
+              (message) => message.role === "member" && message.visibility === "visible",
+            );
+            return {
+              ...d,
+              summary: {
+                created_at: new Date().toISOString(),
+                is_final: action === "review_retry",
+                content: {
+                  overview: `체험 대화에서 나눈 의견 ${opinions.length}개를 모았어요.`,
+                  opinions: opinions.slice(-4).map((message) => ({
+                    text: message.content,
+                    message_ids: [message.id],
+                  })),
+                  agreements: [],
+                  differences: [],
+                  questions: [],
+                  reply: "",
+                },
+              },
+            };
+          });
+          return true;
+        }
         if (["praise", "praise_status"].includes(action)) {
           setData((d) => {
             if (!d || !d.isHost) return d;
@@ -345,8 +403,21 @@ export function RoomView({
         setInfo("체험 화면이에요. 직접 대화방을 만들면 사용할 수 있어요.");
         return true;
       }
-      await api(action, { room_id: roomId, ...payload });
-      await refresh();
+      const result = await api<{ room?: Room }>(action, { room_id: roomId, ...payload });
+      const savedRoom = result?.room;
+      if (savedRoom?.id === roomId && savedRoom.state !== "ended") {
+        const confirmed = confirmedRoom.current;
+        if (confirmed?.id !== roomId || savedRoom.revision > confirmed.revision)
+          confirmedRoom.current = savedRoom;
+        setData((current) =>
+          current?.room.id === roomId && savedRoom.revision > current.room.revision
+            ? { ...current, room: savedRoom }
+            : current,
+        );
+        void refresh();
+      } else {
+        await refresh();
+      }
       return true;
     } catch (e) {
       setError((e as Error).message);
@@ -355,35 +426,39 @@ export function RoomView({
   }
   async function send(e: React.FormEvent) {
     e.preventDefault();
-    if (!text.trim() || busy || !data) return;
-    if (
-      !data.isHost &&
-      !ask &&
-      (!data.room.round_open ||
-        data.myRoundSubmitted ||
-        (data.room.speaker_ids &&
-          !data.room.speaker_ids.includes(data.me?.id || "")))
-    )
+    if (!data || busy || sendBlocked || editConflict || editUnchanged || !composerText.trim())
       return;
+    const content = composerText;
+    const messageStance = data.room.kind === "debate" ? composerStance : null;
+    const isAiRequest = ask && !editing;
     setBusy(true);
-    setError("");
+    setSendError("");
+    setInfo("");
+    if (!isAiRequest) setPendingOpinion({ content, edit: !!editing });
     try {
       if (demo) {
-        const m: Message = {
+        const m: Message = editing ? {
+          ...editing.original,
+          content,
+          stance: messageStance ?? undefined,
+          edited_at: new Date().toISOString(),
+          edit_client_id: crypto.randomUUID(),
+        } : {
           id: Date.now(),
           room_id: "demo",
-          role: ask ? "ai" : data.isHost ? "host" : "member",
-          member_id: !ask && !data.isHost ? data.me!.id : null,
-          nickname: ask
+          role: isAiRequest ? "ai" : data.isHost ? "host" : "member",
+          member_id: !isAiRequest && !data.isHost ? data.me!.id : null,
+          nickname: isAiRequest
             ? "이야기별"
             : data.isHost
               ? "진행자"
               : data.me!.nickname,
-          avatar: ask ? "⭐" : data.isHost ? "🌷" : data.me!.avatar,
+          avatar: isAiRequest ? "⭐" : data.isHost ? "🌷" : data.me!.avatar,
           round_number: data.room.round_number,
-          content: ask
+          content: isAiRequest
             ? "체험용 답변이에요. 서로의 생각에서 공통점을 찾아보고, 함께 실천할 한 가지를 골라 볼까요?"
-            : text,
+            : content,
+          stance: messageStance ?? undefined,
           visibility: "visible",
           created_at: new Date().toISOString(),
         };
@@ -391,45 +466,59 @@ export function RoomView({
           d
             ? {
                 ...d,
-                myRoundSubmitted: !ask && !d.isHost ? true : d.myRoundSubmitted,
-                messages: [...d.messages, m],
+                myRoundSubmitted: !isAiRequest && !d.isHost ? true : d.myRoundSubmitted,
+                messages: editing
+                  ? d.messages.map((message) => message.id === m.id ? m : message)
+                  : [...d.messages, m],
+                summary: editing ? null : d.summary,
               }
             : d,
         );
-        setInfo("체험 대화는 이 화면에만 남아요. AI 요약은 예시예요.");
+        setInfo(editing ? "체험 의견을 수정했어요." : "체험 대화는 이 화면에만 남아요.");
       } else {
         const signature = JSON.stringify([
           roomId,
-          text,
-          ask,
-          stance,
+          content,
+          isAiRequest,
+          messageStance,
           data.room.round_number,
+          editing?.original.id,
+          editing?.original.edit_client_id,
         ]);
         if (pendingSend.current?.signature !== signature)
           pendingSend.current = { signature, id: crypto.randomUUID() };
         const result = await api<{ visibility?: string; safety_reason?: string }>(
-          ask ? "ask_ai" : "message",
+          editing ? "edit_message" : isAiRequest ? "ask_ai" : "message",
           {
             room_id: roomId,
-            content: text,
-            stance: data?.room.kind === "debate" ? stance : null,
+            content,
+            stance: messageStance,
             client_id: pendingSend.current.id,
             expected_round: data.room.round_number,
+            ...(editing ? {
+              message_id: editing.original.id,
+              expected_edit_id: editing.original.edit_client_id ?? null,
+            } : {}),
           },
         );
+        setPendingOpinion(null);
         if (result.visibility === "held")
-          setInfo("이 발언은 안전 확인을 위해 진행자 검토를 기다려요.");
+          setInfo("저장했어요. 진행자가 안전을 확인한 뒤 의견이 공개돼요.");
         else if (result.safety_reason)
-          setInfo("발언을 보냈어요. 외부 안전 검사가 지연되어 기본 검사를 적용했어요.");
-        else if (ask) setInfo("이야기별에게 요청했어요. 잠시 기다려 주세요.");
+          setInfo("저장했어요. 외부 안전 검사가 지연되어 기본 검사를 적용했어요.");
+        else if (isAiRequest) setInfo("이야기별에게 요청했어요. 잠시 기다려 주세요.");
+        else if (editing) setInfo("의견을 수정했어요.");
+        else setInfo("의견을 저장했어요.");
         await refresh();
       }
-      setText((current) => clearSentDraft(current, text));
+      if (editing) setEditDraft(null);
+      else setText((current) => clearSentDraft(current, content));
       pendingSend.current = null;
       input.current?.focus();
     } catch (e) {
-      setError((e as Error).message);
+      setSendError((e as Error).message);
     } finally {
+      setPendingOpinion(null);
       setBusy(false);
     }
   }
@@ -525,20 +614,36 @@ export function RoomView({
         </main>
       </>
     );
-  if (data.room.state === "ended" && (!data.isHost || !reviewRecords)) return <DiscussionReview data={demo ? {...data, summary: data.summary ? {...data.summary, is_final: true} : null} : data} demo={demo} records={() => setReviewRecords(true)} retry={async () => {if (!await mutate("review_retry")) throw new Error("최종 요약을 요청하지 못했어요. AI 연결 상태를 확인하고 다시 시도해 주세요.");}} />;
+  if (data.room.state === "ended" && (!data.isHost || !reviewRecords)) return <DiscussionReview data={data} demo={demo} records={() => setReviewRecords(true)} retry={async () => {if (!await mutate("review_retry")) throw new Error("최종 요약을 요청하지 못했어요. AI 연결 상태를 확인하고 다시 시도해 주세요.");}} />;
   const { room, isHost, members, messages, summary, praise, me } = data;
   const canAsk = isHost || !!me?.can_ask_ai;
   const active = room.state === "active";
-  const submitted =
-    !!data.myRoundSubmitted ||
-    (!!me &&
-      messages.some(
-        (m) => m.member_id === me.id && m.round_number === room.round_number,
-      ));
+  const currentOpinion = me && (data.myRoundMessage ?? messages.find(
+    (m) => m.role === "member" && m.member_id === me.id && m.round_number === room.round_number,
+  ));
+  const submitted = !!data.myRoundSubmitted || !!currentOpinion;
   const listening =
     !!room.speaker_ids && !room.speaker_ids.includes(me?.id || "");
+  const editableOpinion =
+    !isHost && me?.state === "approved" && !me.muted &&
+    active && room.round_open && !listening &&
+    currentOpinion &&
+    ["visible", "held"].includes(currentOpinion.visibility)
+      ? currentOpinion
+      : null;
+  const editing = editableOpinion && editDraft?.original.id === editableOpinion.id
+    ? editDraft
+    : null;
+  const composerText = editing?.content ?? text;
+  const composerStance = editing?.stance ?? stance;
+  const editConflict = !!editing &&
+    (editableOpinion?.edit_client_id ?? null) !== (editing.original.edit_client_id ?? null) &&
+    editableOpinion?.edit_client_id !== pendingSend.current?.id;
+  const editUnchanged = !!editing &&
+    editing.content.trim() === editing.original.content.trim() &&
+    editing.stance === (editing.original.stance ?? "neutral");
   const roundBlocked =
-    !isHost && !ask && (!room.round_open || submitted || listening);
+    !isHost && !ask && (!room.round_open || (submitted && !editing) || listening);
   const sendBlocked =
     !active ||
     !!me?.muted ||
@@ -556,6 +661,10 @@ export function RoomView({
   const thinking = data.jobs.some((j) =>
     ["queued", "running"].includes(j.status),
   );
+  const summaryPending = summaryBusy || data.jobs.some(
+    (job) => job.kind === "summary" && ["queued", "running"].includes(job.status),
+  );
+  const canSummarize = isHost && data.canRequestSummary !== false;
   function summaryItems(items: SummaryItem[]) {
     return items.map((item, i) => (
       <li key={i}>
@@ -642,6 +751,7 @@ export function RoomView({
                 };
               });
               setAsk(false);
+              setEditDraft(null);
               setTab("chat");
             }}
           >
@@ -704,16 +814,22 @@ export function RoomView({
               <QrCode size={18} />
             </button>
           )}
-          {isHost && (room.state === "ended" ? <button className="button primary small" onClick={() => setReviewRecords(false)}>최종 정리 화면 보기</button> : <button className="button secondary small" onClick={() => setConfirm("end")}>대화 끝내고 정리하기</button>)}
+          {isHost && (room.state === "ended" ? <button className="button primary small" onClick={() => setReviewRecords(false)}>최종 정리 화면 보기</button> : <button className="button secondary small" disabled={roundBusy} onClick={() => setConfirm("end")}>대화 끝내고 정리하기</button>)}
           {isHost && room.state !== "ended" && (
             <button
               className={"button small " + (active ? "secondary" : "primary")}
-              onClick={() =>
-                mutate("room_state", { state: active ? "paused" : "active" })
-              }
+              disabled={roundBusy}
+              onClick={async () => {
+                setRoundBusy(true);
+                try {
+                  await mutate("room_state", { state: active ? "paused" : "active" });
+                } finally {
+                  setRoundBusy(false);
+                }
+              }}
             >
               {active ? <Pause size={17} /> : <Play size={17} />}{" "}
-              {active ? "잠시 멈춤" : "대화방 열기"}
+              {roundBusy ? "변경 중…" : active ? "잠시 멈춤" : "대화방 열기"}
             </button>
           )}
         </div>
@@ -902,19 +1018,6 @@ export function RoomView({
                 <Settings2 size={16} />
                 대화방 설정
               </summary>
-              <label htmlFor="ai-mode">이야기별 참여 정도</label>
-              <select
-                id="ai-mode"
-                value={room.ai_mode}
-                onChange={(e) =>
-                  mutate("room_settings", { ai_mode: e.target.value })
-                }
-              >
-                <option value="off">직접 요청만</option>
-                <option value="quiet">조용히 정리</option>
-                <option value="balanced">정리와 선택 반응</option>
-                <option value="active">조금 더 자주</option>
-              </select>
               <button
                 className="text-button"
                 onClick={() => mutate("rotate_code")}
@@ -947,6 +1050,7 @@ export function RoomView({
             thinking={thinking}
             busy={roundBusy}
             onSpeaker={openSpeaker}
+            onRoundOpinions={() => setRoundOpinions(true)}
             onLock={() => changeRound("round_control")}
             onNext={() => setNextRound(true)}
             onPresenters={() => {
@@ -958,26 +1062,65 @@ export function RoomView({
             <div className="composer-options">
               <span>
                 <Smile size={16} />
-                {ask
-                  ? "이야기별에게 요청해요"
-                  : isHost
-                    ? "진행자의 이야기를 전해요"
-                    : `${room.round_number}번째 차례 · 친구의 말에 이어서 대화해요`}
+                {editing
+                  ? `${room.round_number}번째 차례 · 내 의견을 고쳐요`
+                  : ask
+                    ? "이야기별에게 요청해요"
+                    : isHost
+                      ? "진행자의 이야기를 전해요"
+                      : `${room.round_number}번째 차례 · 친구의 말에 이어서 대화해요`}
               </span>
-              {canAsk && (
-                <button
-                  type="button"
-                  className={"ai-toggle " + (ask ? "on" : "")}
-                  onClick={() => setAsk(!ask)}
-                  aria-pressed={ask}
-                  disabled={!data.aiEnabled}
-                >
-                  <Sparkles size={14} />
-                  이야기별에게
-                </button>
-              )}
+              <div className="composer-actions">
+                {editing ? (
+                  <button
+                    type="button"
+                    className="text-button"
+                    disabled={busy}
+                    onClick={() => {
+                      setEditDraft(null);
+                      setSendError("");
+                    }}
+                  >
+                    수정 취소
+                  </button>
+                ) : (
+                  <>
+                    {editableOpinion && !ask && (
+                      <button
+                        type="button"
+                        className="text-button"
+                        disabled={busy}
+                        onClick={() => {
+                          setSendError("");
+                          setEditDraft({
+                            original: editableOpinion,
+                            content: editableOpinion.content,
+                            stance: editableOpinion.stance ?? "neutral",
+                          });
+                          requestAnimationFrame(() => input.current?.focus());
+                        }}
+                      >
+                        <Pencil size={14} aria-hidden="true" />
+                        내 의견 수정
+                      </button>
+                    )}
+                    {canAsk && (
+                      <button
+                        type="button"
+                        className={"ai-toggle " + (ask ? "on" : "")}
+                        onClick={() => setAsk(!ask)}
+                        aria-pressed={ask}
+                        disabled={!data.aiEnabled}
+                      >
+                        <Sparkles size={14} />
+                        이야기별에게
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
-            {room.kind === "debate" && (
+            {room.kind === "debate" && !ask && !sendBlocked && (
               <div className="stance-picker">
                 {[
                   ["neutral", "자유 의견"],
@@ -987,8 +1130,12 @@ export function RoomView({
                   <button
                     key={v}
                     type="button"
-                    className={stance === v ? "active" : ""}
-                    onClick={() => setStance(v)}
+                    className={composerStance === v ? "active" : ""}
+                    aria-pressed={composerStance === v}
+                    disabled={!!editing && busy}
+                    onClick={() => editing
+                      ? setEditDraft({ ...editing, stance: v })
+                      : setStance(v)}
                   >
                     {t}
                   </button>
@@ -998,9 +1145,13 @@ export function RoomView({
             <div className="composer-input">
               <textarea
                 ref={input}
-                aria-label={ask ? "AI에게 요청" : "대화 입력"}
-                value={text}
-                onChange={(e) => setText(e.target.value)}
+                aria-label={editing ? "의견 수정 입력" : ask ? "AI에게 요청" : "대화 입력"}
+                value={roundBlocked && submitted && !pendingOpinion
+                  ? currentOpinion?.content ?? ""
+                  : composerText}
+                onChange={(e) => editing
+                  ? setEditDraft({ ...editing, content: e.target.value })
+                  : setText(e.target.value)}
                 onKeyDown={(e) => {
                   if (
                     e.key === "Enter" &&
@@ -1020,7 +1171,7 @@ export function RoomView({
                         ? listening
                           ? "지금은 발표하는 친구들의 이야기를 들어요"
                           : submitted
-                            ? "생각을 남겼어요. 다음 차례를 기다려 주세요"
+                            ? "이번 차례에 생각을 남겼어요"
                             : "진행자가 발언을 열면 이야기할 수 있어요"
                         : ask
                           ? "이야기별에게 궁금한 점을 물어보세요"
@@ -1028,23 +1179,37 @@ export function RoomView({
                 }
                 maxLength={2000}
                 rows={2}
-                disabled={sendBlocked}
+                disabled={sendBlocked || (!!editing && busy)}
               />
               <button
-                className="send-button"
-                aria-label={ask ? "AI 요청 보내기" : "메시지 보내기"}
-                disabled={busy || sendBlocked || !text.trim()}
+                className={`send-button${editing ? " edit-save" : ""}`}
+                aria-label={editing ? "수정 내용 저장" : ask ? "AI 요청 보내기" : "메시지 보내기"}
+                disabled={busy || sendBlocked || editConflict || editUnchanged || !composerText.trim()}
               >
-                <Send size={20} />
+                {editing ? "저장" : <Send size={20} />}
               </button>
             </div>
+            {pendingOpinion && (
+              <div className="composer-pending" role="status">
+                <b>{pendingOpinion.edit ? "수정 내용을 확인하고 있어요" : "보낸 의견을 확인하고 있어요"}</b>
+                <p>{pendingOpinion.content}</p>
+              </div>
+            )}
+            {editConflict && !busy && (
+              <Notice error>다른 곳에서 의견이 수정됐어요. 수정 취소를 누르고 최신 의견을 열어 주세요.</Notice>
+            )}
+            <Notice error>{sendError}</Notice>
             <div className="composer-hint">
               <span>
-                {!isHost && !ask
-                  ? "같은 주제로 대화를 이어가요 · 지난 발언은 기록에 남아요"
-                  : "Enter 전송 · Shift+Enter 줄바꿈"}
+                {editing
+                  ? "Enter 저장 · Shift+Enter 줄바꿈"
+                  : !ask && submitted && currentOpinion?.visibility === "held"
+                    ? "진행자가 공개 전에 의견을 확인하고 있어요"
+                    : !isHost && !ask
+                      ? "같은 주제로 대화를 이어가요 · 지난 발언은 기록에 남아요"
+                      : "Enter 전송 · Shift+Enter 줄바꿈"}
               </span>
-              <span>{text.length}/2000</span>
+              {!sendBlocked && <span>{composerText.length}/2000</span>}
             </div>
           </form>
         </section>
@@ -1062,14 +1227,27 @@ export function RoomView({
           </div>
           {canAsk && (
             <div className="ai-quick-actions" aria-label="이야기별에게 요청">
+              {canSummarize && (
+                <button
+                  type="button"
+                  className="manual-summary-button"
+                  disabled={!active || !data.aiEnabled || summaryPending || !messages.some(
+                    (message) => message.visibility === "visible" && ["host", "member"].includes(message.role),
+                  )}
+                  onClick={async () => {
+                    setSummaryBusy(true);
+                    setSide("summary");
+                    await mutate("request_summary", { client_id: crypto.randomUUID() });
+                    setSummaryBusy(false);
+                  }}
+                >
+                  {summaryPending ? "요약 만드는 중…" : "AI 요약 만들기"}
+                </button>
+              )}
               {[
                 [
                   "진행 도와줘",
                   "현재 차례의 대화를 자연스럽게 이어갈 진행 멘트를 제안해 줘.",
-                ],
-                [
-                  "요약해 줘",
-                  "지금까지의 주요 의견, 근거, 공통점과 차이를 정리해 줘.",
                 ],
                 [
                   "질문 제안",
@@ -1148,17 +1326,19 @@ export function RoomView({
                       </ul>
                     </section>
                     <p className="summary-footnote">
-                      AI가 정리한 내용이에요. 원문과 함께 확인해 주세요.
+                      {demo
+                        ? "체험용 요약이에요. 원문과 함께 확인해 주세요."
+                        : "AI가 정리한 내용이에요. 원문과 함께 확인해 주세요."}
                     </p>
                   </>
                 ) : (
                   <div className="small-empty">
                     <Mascot size={120} />
                     <h3>어떤 생각이 모일까요?</h3>
-                    <p>
-                      대화가 쌓이면 이야기별이
-                      <br />
-                      핵심을 보기 좋게 정리해 줘요.
+                    <p role="status">
+                      {summaryPending
+                        ? "이야기별이 대화를 정리하고 있어요."
+                        : "진행자가 AI 요약을 요청하면 이곳에 표시돼요."}
                     </p>
                   </div>
                 )}
@@ -1204,6 +1384,7 @@ export function RoomView({
           </div>
         </aside>
       </main>
+      {roundOpinions && <RoundOpinions data={data} close={() => setRoundOpinions(false)} />}
       {speaker && (
         <Modal
           title={
@@ -1460,7 +1641,7 @@ export function RoomView({
         >
           <p>
             {confirm === "end"
-              ? "발언을 마치고, 승인된 참여자 모두가 대화 정리 화면으로 이동해요. 이야기별이 마지막 발언까지 최종 요약을 만들며 A4 한 장 PDF로 저장·출력할 수 있어요. AI가 중지되어 있으면 기존 정리를 보여줘요. 기록은 90일 동안 보관되며 종료한 방은 다시 열 수 없어요."
+              ? "발언을 마치고, 승인된 참여자 모두가 대화 정리 화면으로 이동해요. 진행자는 그 화면에서 최종 AI 요약을 요청할 수 있어요. 정리 내용은 A4 한 장 PDF로 저장하거나 출력할 수 있어요. 기록은 90일 동안 보관되며 종료한 방은 다시 열 수 없어요."
               : "발언, AI 요약, 포인트 기록이 함께 삭제되며 복구할 수 없어요."}
           </p>
           <Notice error>{error}</Notice>

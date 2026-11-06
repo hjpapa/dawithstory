@@ -34,31 +34,21 @@ async function getRoomAccess(
   actor: string | null,
   admin: boolean,
 ) {
-  const room = check(
-    await db.from("rooms").select("*").eq("id", roomId).maybeSingle(),
-  );
+  const [roomResult, profileResult, memberResult] = await Promise.all([
+    db.from("rooms").select("*").eq("id", roomId).maybeSingle(),
+    actor
+      ? db.from("profiles").select("status").eq("id", actor).maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+    actor
+      ? db.from("members").select("*").eq("room_id", roomId).eq("user_id", actor).maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+  ]);
+  const room = check(roomResult);
   if (!room) throw new Error("대화방을 찾을 수 없어요.");
-  const profile = actor
-    ? check(
-        await db
-          .from("profiles")
-          .select("status")
-          .eq("id", actor)
-          .maybeSingle(),
-      )
-    : null;
+  const profile = check(profileResult);
   const isHost =
     admin || (room.owner_id === actor && profile?.status === "approved");
-  const me = actor
-    ? check(
-        await db
-          .from("members")
-          .select("*")
-          .eq("room_id", roomId)
-          .eq("user_id", actor)
-          .maybeSingle(),
-      )
-    : null;
+  const me = check(memberResult);
   if (
     !isHost &&
     (!me || ["kicked", "rejected"].includes(me.state) || (room.state === "ended" && me.state !== "approved"))
@@ -106,14 +96,14 @@ async function snapshot(
   const access = await getRoomAccess(roomId, actor, admin);
   const { room, isHost, me } = access;
   const aiEnabled = config.ai_live_enabled === "true" || room.is_demo;
+  const canRequestSummary = isHost && !admin && room.owner_id === actor;
   const reviewJob = room.state === "ended" ? check(await db.from("ai_jobs").select("status,error").eq("room_id", roomId).eq("kind", "final").order("created_at", { ascending: false }).limit(1).maybeSingle()) : null;
-  const version = JSON.stringify([room.revision, room.state, room.messages_epoch, room.ai_error, aiEnabled, isHost, reviewJob]);
+  const version = JSON.stringify([room.revision, room.state, room.messages_epoch, room.ai_error, aiEnabled, isHost, canRequestSummary, reviewJob]);
   if (room.state === "ended" && !isHost) {
     if (!exporting && sync?.version === version) return {unchanged:true,version};
-    const [messages, summary, job, members] = await Promise.all([
+    const [messages, summary, members] = await Promise.all([
       readMessages(roomId, false),
       db.from("summaries").select("content,created_at,is_final,through_message_id").eq("room_id", roomId).order("is_final", { ascending: false }).order("created_at", { ascending: false }).limit(1).maybeSingle(),
-      db.from("ai_jobs").select("status,error").eq("room_id", roomId).eq("kind", "final").order("created_at", { ascending: false }).limit(1).maybeSingle(),
       db.from("members").select("id,nickname,avatar,state").eq("room_id", roomId).eq("state", "approved"),
     ]);
     const latest = check(await db.from("rooms").select("messages_epoch").eq("id", roomId).single());
@@ -121,7 +111,7 @@ async function snapshot(
       if (retry) return snapshot(roomId, actor, admin, config, exporting, undefined, false);
       throw new Error("대화가 변경되고 있어요. 다시 확인해 주세요.");
     }
-    return { room, isHost, me, version, reviewOnly: true, reviewJob: check(job), aiEnabled,
+    return { room, isHost, me, version, reviewOnly: true, reviewJob, aiEnabled,
       messagesReset: true, messages: check(messages).map((m: any) => ({ id:m.id, room_id:m.room_id, role:m.role, member_id:m.member_id, nickname:m.nickname, avatar:m.avatar, content:m.content, stance:m.stance, visibility:m.visibility, round_number:m.round_number, created_at:m.created_at })),
       members: check(members), summary: check(summary), praise: [], jobs: [], reports: [], myPoints: 0, canHeartbeat: false };
   }
@@ -155,9 +145,10 @@ async function snapshot(
     readPraise(roomId),
     db
       .from("ai_jobs")
-      .select("status,error,created_at")
+      .select("kind,status,error,created_at")
       .eq("room_id", roomId)
       .in("status", ["queued", "running"])
+      .order("kind", { ascending: false })
       .limit(20),
     isHost
       ? db
@@ -166,19 +157,22 @@ async function snapshot(
           .eq("room_id", roomId)
           .eq("resolved", false)
       : Promise.resolve({ data: [], error: null }),
-    me
+    me && !isHost
       ? db
           .from("messages")
-          .select("id")
+          .select("id,room_id,role,member_id,nickname,avatar,content,stance,visibility,safety_reason,round_number,created_at,edit_client_id,edited_at")
           .eq("room_id", roomId)
           .eq("member_id", me.id)
+          .eq("role", "member")
           .eq("round_number", room.round_number)
           .limit(1)
-      : Promise.resolve({ data: [], error: null }),
+          .maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
   ]);
   const praises = check(praiseResult);
   const members = check(membersResult);
-  // A concurrent hide must never be merged into a cache with the old epoch.
+  const ownRoundMessage = check(ownRoundResult);
+  // A concurrent edit or hide must never be merged into a cache with the old epoch.
   const latest = check(await db.from("rooms").select("messages_epoch").eq("id", roomId).single());
   if (latest.messages_epoch !== room.messages_epoch) {
     if (retry) return snapshot(roomId, actor, admin, config, exporting, undefined, false);
@@ -192,6 +186,7 @@ async function snapshot(
     version,
     messagesReset: !incremental,
     canHeartbeat: room.state !== "ended" && !admin && room.owner_id === actor,
+    canRequestSummary,
     reviewJob,
     members: members
       .filter((m: any) => isHost || m.state === "approved")
@@ -213,7 +208,8 @@ async function snapshot(
     reports: check(reportsResult),
     aiEnabled,
     myPoints: me ? points(me.id) : 0,
-    myRoundSubmitted: check(ownRoundResult).length > 0,
+    myRoundSubmitted: !!ownRoundMessage,
+    myRoundMessage: ownRoundMessage?.visibility === "hidden" ? null : ownRoundMessage,
   };
 }
 const processJobs = createJobProcessor({ db, readMessages });
@@ -495,14 +491,21 @@ Deno.serve(async (req) => {
         !["discussion", "debate", "daily"].includes(p.kind))
     )
       throw new Error("제목과 주제를 입력해 주세요.");
-    if (["message", "ask_ai"].includes(action)) {
-      const access = await getRoomAccess(p.room_id, user?.id || null, admin);
+    if (["message", "edit_message", "ask_ai"].includes(action)) {
       if (
         !safe(p.content) ||
         p.content.length > 2000 ||
         !uuid.test(p.client_id || "")
       )
         throw new Error("1~2000자로 입력해 주세요.");
+      if (
+        action === "edit_message" &&
+        (!Number.isSafeInteger(p.message_id) || p.message_id < 1 ||
+          !Number.isSafeInteger(p.expected_round) || p.expected_round < 1 ||
+          (p.expected_edit_id != null && !uuid.test(p.expected_edit_id)))
+      )
+        throw new Error("수정할 의견을 다시 확인해 주세요.");
+      const access = await getRoomAccess(p.room_id, user?.id || null, admin);
       if (
         access.room.state !== "active" ||
         new Date(access.room.host_seen_at).getTime() < Date.now() - 60000
@@ -515,9 +518,18 @@ Deno.serve(async (req) => {
         throw new Error("발언 권한이 없어요.");
       if (action === "ask_ai" && !access.isHost && !access.me?.can_ask_ai)
         throw new Error("진행자가 AI 요청 권한을 주면 사용할 수 있어요.");
-      const key = (config.ai_live_enabled === "true" || access.room.is_demo)
-        ? check(await db.rpc("story_ai_key")) : null;
-      const { reason, degraded } = await incomingSafety(key, p.content, action === "ask_ai");
+      if (
+        action === "edit_message" &&
+        (access.isHost || !access.room.round_open || p.expected_round !== access.room.round_number)
+      )
+        throw new Error("현재 열려 있는 장의 내 의견만 수정할 수 있어요.");
+      const localReason = safety(p.content);
+      const key = !localReason && (config.ai_live_enabled === "true" || access.room.is_demo)
+        ? check(await db.rpc("story_ai_key"))
+        : null;
+      const { reason, degraded } = localReason
+        ? { reason: localReason, degraded: false }
+        : await incomingSafety(key, p.content, action === "ask_ai");
       if (action === "ask_ai" && reason) throw new Error(reason);
       p.visibility = reason ? "held" : "visible";
       p.safety_reason = reason || (degraded ? "외부 안전 검사가 지연되어 기본 검사만 적용했어요. 진행자가 확인해 주세요." : null);
@@ -535,7 +547,9 @@ Deno.serve(async (req) => {
       "rotate_code",
       "member",
       "message",
+      "edit_message",
       "ask_ai",
+      "request_summary",
       "message_visibility",
       "praise",
       "praise_status",
@@ -554,7 +568,7 @@ Deno.serve(async (req) => {
         p,
       }),
     );
-    if (["message", "ask_ai", "room_state", "review_retry"].includes(action))
+    if (["ask_ai", "request_summary", "review_retry"].includes(action))
       EdgeRuntime.waitUntil(processJobs());
     return json(result);
   } catch (error) {

@@ -1,18 +1,15 @@
 "use client";
 import {
   ArrowRight,
+  List,
   LockKeyhole,
   LockKeyholeOpen,
   MessageCircle,
   Sparkles,
 } from "lucide-react";
-import type { Snapshot } from "@/lib/domain";
-import {
-  plazaSeats,
-  latestVisibleMessage,
-  speakerMessages,
-  type Speaker,
-} from "@/lib/plaza";
+import { useMemo } from "react";
+import type { Message, Snapshot } from "@/lib/domain";
+import { plazaSeats, type Speaker } from "@/lib/plaza";
 import { Mascot } from "./ui";
 
 export function Plaza({
@@ -20,6 +17,7 @@ export function Plaza({
   thinking,
   busy,
   onSpeaker,
+  onRoundOpinions,
   onLock,
   onNext,
   onPresenters,
@@ -28,6 +26,7 @@ export function Plaza({
   thinking: boolean;
   busy: boolean;
   onSpeaker: (speaker: Speaker) => void;
+  onRoundOpinions: () => void;
   onLock: () => void;
   onNext: () => void;
   onPresenters: () => void;
@@ -38,19 +37,29 @@ export function Plaza({
     ? approved.filter((m) => room.speaker_ids!.includes(m.id))
     : null;
   const seats = plazaSeats(approved.length);
-  const spoken = new Set(
-    messages
-      .filter(
-        (m) => m.role === "member" && m.round_number === room.round_number,
-      )
-      .map((m) => m.member_id),
-  );
-  if (data.myRoundSubmitted && me) spoken.add(me.id);
-  const count = approved.filter((m) => spoken.has(m.id)).length;
-  const hostMessage = latestVisibleMessage(messages, { role: "host" });
-  const aiMessage = messages
-    .filter((m) => m.role === "ai" && m.visibility === "visible")
-    .at(-1);
+  const { historyByMember, spoken, hostMessage, aiMessage } = useMemo(() => {
+    const historyByMember = new Map<string, { count: number; latest?: Message }>();
+    const spoken = new Set<string>();
+    let hostMessage: Message | undefined;
+    let aiMessage: Message | undefined;
+    for (const message of messages) {
+      if (message.member_id) {
+        const history = historyByMember.get(message.member_id) ?? { count: 0 };
+        history.count++;
+        if (message.visibility === "visible") history.latest = message;
+        historyByMember.set(message.member_id, history);
+        if (message.role === "member" && message.round_number === room.round_number)
+          spoken.add(message.member_id);
+      }
+      if (message.visibility !== "visible") continue;
+      if (message.role === "host") hostMessage = message;
+      if (message.role === "ai") aiMessage = message;
+    }
+    return { historyByMember, spoken, hostMessage, aiMessage };
+  }, [messages, room.round_number]);
+  const ownSubmittedId = data.myRoundSubmitted ? me?.id : undefined;
+  const didSpeak = (id: string) => spoken.has(id) || ownSubmittedId === id;
+  const count = approved.filter((m) => didSpeak(m.id)).length;
   return (
     <>
       <div className="plaza-heading">
@@ -65,7 +74,9 @@ export function Plaza({
       <div className="round-bar">
         <div aria-live="polite">
           <b>
-            {room.state === "active" && room.round_open
+            {busy
+              ? "차례 설정을 적용하고 있어요…"
+              : room.state === "active" && room.round_open
               ? presenters
                 ? "선택한 친구들의 발표 시간"
                 : "서로의 말에 이어 대화해요"
@@ -78,6 +89,14 @@ export function Plaza({
             · 진행자는 언제든 발언
           </span>
         </div>
+        <button
+          type="button"
+          className="button secondary small round-opinions-trigger"
+          onClick={onRoundOpinions}
+        >
+          <List size={16} aria-hidden="true" />
+          이번 장 의견 보기
+        </button>
         {isHost && (
           <div className="round-controls">
             <button
@@ -162,10 +181,10 @@ export function Plaza({
           </button>
           {approved.map((member, i) => {
             const speaker: Speaker = { role: "member", memberId: member.id };
-            const message = latestVisibleMessage(messages, speaker);
+            const history = historyByMember.get(member.id);
+            const message = history?.latest;
             const isCurrent = message?.round_number === room.round_number;
-            const history = speakerMessages(messages, speaker);
-            const submitted = spoken.has(member.id);
+            const submitted = didSpeak(member.id);
             const presenting = !!room.speaker_ids?.includes(member.id);
             const canSpeak = !room.speaker_ids || presenting;
             return (
@@ -175,7 +194,7 @@ export function Plaza({
                 className={`plaza-seat seat-tone-${i % 5} ${message ? "has-speech" : ""} ${me?.id === member.id ? "my-seat" : ""} ${presenting ? "presenting-seat" : ""}`}
                 style={seats.members[i]}
                 onClick={() => onSpeaker(speaker)}
-                aria-label={`${member.nickname} 전체 발언 ${history.length}개 보기`}
+                aria-label={`${member.nickname} 전체 발언 ${history?.count ?? 0}개 보기`}
               >
                 <span
                   className={`seat-bubble ${!message ? "bubble-empty" : ""}`}

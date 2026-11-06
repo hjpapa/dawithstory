@@ -537,6 +537,11 @@
   color: #785f30;
   font-size: 11px;
 }
+.ai-quick-actions .manual-summary-button {
+  background: #ffe897;
+  border-color: #e7c660;
+  font-weight: 700;
+}
 .ai-quick-actions button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -562,6 +567,35 @@
 }
 .speaker-history .message-actions {
   opacity: 1;
+}
+.round-opinions-trigger {
+  flex-shrink: 0;
+}
+.round-participation {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid #dcece5;
+  border-radius: 12px;
+  background: #f8fcfa;
+  color: #47645d;
+  font-size: 13px;
+}
+.round-participation summary {
+  font-weight: 700;
+  cursor: pointer;
+}
+.round-participation p,
+.round-opinions-count {
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.round-participation p {
+  margin: 8px 0 0;
+}
+.round-opinions-count {
+  color: #47645d;
+  margin: 0 0 12px;
 }
 .history-round {
   font-size: 10px;

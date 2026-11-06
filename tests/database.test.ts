@@ -49,6 +49,7 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
         "praise.sql",
         "reliability.sql",
         "review.sql",
+        "edit-opinions.sql",
       ]) {
         const sql = (await readFile(`tests/${file}`, "utf8")).replace(
           /^begin;|^rollback;/gm,
@@ -152,7 +153,7 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
       },
     );
     await t.test(
-      "worker drains 165 speeches in order and retains valid older citations",
+      "one teacher request summarizes all 165 speeches and filters invalid citations",
       async () => {
         await db.exec("begin");
         try {
@@ -179,9 +180,8 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
           const api = pgApi(db);
           const processor = createJobProcessor({
             db: api,
-            readMessages: async () => {
-              throw Error("unexpected final job");
-            },
+            readMessages: async (roomId) =>
+              api.from("messages").select("*").eq("room_id", roomId).order("id", { ascending: true }),
             requestResponse: async (_key, payload) => {
               const input = JSON.parse(payload.input as string);
               batches.push(input.messages.map((m: any) => m.id));
@@ -212,8 +212,17 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
             },
             moderate: async () => null,
           });
-          await processor(); // bounded worker invocation: two batches
-          assert.deepEqual(batches.flat(), ids.slice(0, 160));
+          await processor();
+          assert.equal(batches.length, 0);
+          const request = await api.rpc("story_mutate", {
+            p_actor: host,
+            p_admin: false,
+            p_action: "request_summary",
+            p: { room_id: room, client_id: crypto.randomUUID() },
+          });
+          assert.equal(request.error, null);
+          await processor();
+          assert.deepEqual(batches, [ids]);
           assert.equal(
             (
               await db.query<{ summary_cursor: number }>(
@@ -221,24 +230,17 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
                 [room],
               )
             ).rows[0].summary_cursor,
-            ids[159],
+            ids.at(-1),
           );
-          await processor();
-          assert.deepEqual(
-            batches.map((b) => b.length),
-            [80, 80, 5],
-          );
-          assert.deepEqual(batches.flat(), ids);
           const summaries = await db.query<{ content: any }>(
             "select content from public.summaries where room_id=$1 order by through_message_id",
             [room],
           );
-          assert.equal(summaries.rows.length, 3);
-          for (const row of summaries.rows)
-            assert.deepEqual(row.content.opinions[0].message_ids, [ids[0]]);
+          assert.equal(summaries.rows.length, 1);
+          assert.deepEqual(summaries.rows[0].content.opinions[0].message_ids, [ids[0]]);
           const usage = await api.rpc("story_usage");
-          assert.equal(usage.data.input_tokens, 600); // finish must not double count
-          assert.equal(usage.data.output_tokens, 300);
+          assert.equal(usage.data.input_tokens, 200); // finish must not double count
+          assert.equal(usage.data.output_tokens, 100);
           assert.equal(
             (
               await db.query(
@@ -355,7 +357,7 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
                 [room],
               )
             ).rows.length,
-            1,
+            0,
           );
           assert.equal(
             (

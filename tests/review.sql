@@ -7,6 +7,7 @@ begin
  insert into public.profiles(id,email,status) values(h,'review@example.invalid','approved');
  insert into public.rooms(owner_id,title,topic,kind,state,is_demo,ai_mode) values(h,'가상 회고 검증','가상의 의견','discussion','active',true,'off') returning id into r;
  insert into public.members(room_id,user_id,nickname,avatar,state) values(r,guest,'가상 참여자','🐰','approved');
+ insert into public.messages(room_id,role,nickname,content) values(r,'host','진행자','첫 공개 발언');
  insert into public.messages(room_id,role,nickname,content) values(r,'host','진행자','마지막 공개 발언') returning id into mid;
  begin
   perform public.story_mutate(guest,false,'room_state',jsonb_build_object('room_id',r,'state','ended'));
@@ -14,6 +15,13 @@ begin
  exception when others then if SQLERRM like 'TEST%' then raise; end if; end;
  perform public.story_mutate(h,false,'room_state',jsonb_build_object('room_id',r,'state','ended'));
  perform public.story_mutate(h,false,'room_state',jsonb_build_object('room_id',r,'state','ended'));
+ if exists(select 1 from public.ai_jobs where room_id=r and kind='final') then raise exception 'ending automatically queued a final summary'; end if;
+ begin
+  perform public.story_mutate(guest,false,'review_retry',jsonb_build_object('room_id',r));
+  raise exception 'TEST participant queued a final summary';
+ exception when others then if SQLERRM like 'TEST%' then raise; end if; end;
+ perform public.story_mutate(h,false,'review_retry',jsonb_build_object('room_id',r));
+ perform public.story_mutate(h,false,'review_retry',jsonb_build_object('room_id',r));
  if (select count(*) from public.ai_jobs where room_id=r and kind='final')<>1 then raise exception 'duplicate final job'; end if;
  update public.ai_jobs set created_at='1800-01-01' where room_id=r;
  update public.rooms set host_seen_at='1800-01-01' where id=r;

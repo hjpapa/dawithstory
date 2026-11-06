@@ -9,7 +9,7 @@ export function reviewContent(data: Snapshot) {
     participants: data.members.filter(m => m.state === "approved").length,
     speeches: speeches.length, rounds: data.room.round_number,
     final: !!data.summary?.is_final,
-    overview: summary?.overview || (speeches.length ? "최종 AI 요약이 아직 준비되지 않았습니다. 아래는 공개 발언의 일부 발췌입니다." : "이번 대화에는 공개된 진행자·참여자 발언이 없습니다."),
+    overview: summary?.overview || (speeches.length ? "이번 대화에서 공개된 발언의 일부를 모았어요." : "이번 대화에는 공개된 진행자·참여자 발언이 없습니다."),
     opinions: summary?.opinions.map(x => x.text) || speeches.slice(0, 5).map(m => m.content),
     agreements: summary?.agreements.map(x => x.text) || [],
     differences: summary?.differences.map(x => x.text) || [],

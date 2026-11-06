@@ -1,7 +1,7 @@
 begin;
 select set_config('request.jwt.claims','{"role":"service_role"}',true);
 do $$
-declare h uuid:=gen_random_uuid(); r uuid; r2 uuid; mid bigint; j uuid; j2 uuid; obj jsonb; result jsonb:='{"overview":"가상 요약","reply":"가상 답변","opinions":[],"agreements":[],"differences":[],"questions":[],"praise":[]}';
+declare h uuid:=gen_random_uuid(); r uuid; r2 uuid; mid bigint; j uuid; j2 uuid; summary_job uuid; obj jsonb; result jsonb:='{"overview":"가상 요약","reply":"가상 답변","opinions":[],"agreements":[],"differences":[],"questions":[],"praise":[]}';
 begin
  insert into auth.users(id,email,is_anonymous) values(h,'reliability@example.invalid',false);
  insert into public.profiles(id,email,status) values(h,'reliability@example.invalid','approved');
@@ -10,6 +10,8 @@ begin
  insert into public.messages(room_id,role,nickname,content) values(r,'host','교사','가상의 숨길 원문') returning id into mid;
  insert into public.ai_jobs(room_id,kind,requested_by,status,attempts,through_message_id,leased_until) values(r,'request',h,'running',1,mid,now()+interval '120 seconds') returning id into j;
  if not public.story_finish_job(j,result,10,10,1) then raise exception 'completion failed'; end if;
+ insert into public.ai_jobs(room_id,kind,requested_by,status,attempts,through_message_id,leased_until) values(r,'summary',h,'running',1,mid,now()+interval '120 seconds') returning id into summary_job;
+ if not public.story_finish_job(summary_job,result,10,10,1) then raise exception 'summary completion failed'; end if;
  perform public.story_mutate(h,false,'message_visibility',jsonb_build_object('room_id',r,'message_id',mid,'visibility','hidden'));
  if exists(select 1 from public.messages where room_id=r and visibility='visible') then raise exception 'hidden text derivative remained visible'; end if;
  if exists(select 1 from public.summaries where room_id=r) then raise exception 'summary remained'; end if;

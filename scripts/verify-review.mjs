@@ -6,7 +6,6 @@ async function call(action,p={},token=host.token){const res=await fetch(env.NEXT
 async function good(action,p={},token){const r=await call(action,p,token);assert.ok(r.ok,JSON.stringify(r.data));return r.data;}
 const room=await good('create_room',{title:'가상 종료 요약 검증',topic:'가상 공원에 꽃을 심을까요?',kind:'discussion'});fixture.room=room;fs.writeFileSync(path,JSON.stringify(fixture));
 const payload={room_id:room.id};
-await good('room_settings',{...payload,ai_mode:'off'});
 await good('room_state',{...payload,state:'active'});
 const member=await good('join',{code:room.code,nickname:'가상토끼',avatar:'🐰'},guest.token);
 await good('member',{...payload,member_id:member.id,state:'approved'});
@@ -19,13 +18,17 @@ await good('room_state',{...payload,state:'ended'});
 await good('room_state',{...payload,state:'ended'});
 let snapshot=await good('snapshot',payload,guest.token);
 assert.equal(snapshot.room.state,'ended');assert.equal(snapshot.reviewOnly,true);
+assert.equal(snapshot.reviewJob,null,'ending should leave final AI review unrequested');
+assert.ok(!snapshot.summary?.is_final);
 assert.equal(snapshot.messages.length,2);assert.ok(snapshot.messages.every(m=>!m.user_id&&!m.safety_reason));
 assert.equal((await call('snapshot',payload,outsider.token)).ok,false);
 assert.equal((await call('message',{...payload,content:'종료 후 발언',client_id:crypto.randomUUID()},guest.token)).ok,false);
 assert.equal((await call('ask_ai',{...payload,content:'종료 후 요청',client_id:crypto.randomUUID()})).ok,false);
+assert.equal((await call('review_retry',payload,guest.token)).ok,false);
 assert.equal((await call('join',{code:room.code,nickname:'늦은가상',avatar:'🐻'},outsider.token)).ok,false);
 console.log('PASS shared review, hidden speech omission, outsider denial, ended speech/AI/join denial, duplicate end');
 if(snapshot.aiEnabled){
+ await good('review_retry',payload);
  for(let i=0;i<24 && !snapshot.summary?.is_final;i++){await new Promise(r=>setTimeout(r,5000));snapshot=await good('snapshot',payload,guest.token);if(['failed','cancelled'].includes(snapshot.reviewJob?.status))break;}
  assert.equal(snapshot.summary?.is_final,true,'final AI review: '+JSON.stringify(snapshot.reviewJob));
  assert.ok(snapshot.summary.content.overview);console.log('PASS final AI summary is available to approved participant');

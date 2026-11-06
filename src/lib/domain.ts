@@ -63,6 +63,8 @@ export type Message = {
   safety_reason?: string;
   round_number?: number | null;
   created_at: string;
+  edit_client_id?: string | null;
+  edited_at?: string | null;
 };
 export type SummaryItem = { text: string; message_ids: number[] };
 export type Summary = {
@@ -91,13 +93,14 @@ export type Snapshot = {
   me: Member | null;
   isHost: boolean;
   canHeartbeat?: boolean;
+  canRequestSummary?: boolean;
   members: Member[];
   messages: Message[];
   summary: { content: Summary; created_at: string; is_final?: boolean; through_message_id?: number } | null;
   reviewOnly?: boolean;
   reviewJob?: { status: string; error?: string } | null;
   praise: Praise[];
-  jobs: { status: string; error?: string }[];
+  jobs: { kind?: string; status: string; error?: string }[];
   reports: {
     id: string;
     message_id: number;
@@ -107,6 +110,7 @@ export type Snapshot = {
   aiEnabled: boolean;
   myPoints: number;
   myRoundSubmitted?: boolean;
+  myRoundMessage?: Message | null;
 };
 export function csvCell(value: unknown) {
   let str = String(value ?? "");

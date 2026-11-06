@@ -221,6 +221,8 @@ if (mode === "setup") {
     assert.equal(held.visibility, "held");
     snap = await good("snapshot", { room_id: room.id }, guest.token);
     assert.equal(snap.myRoundSubmitted, true);
+    assert.equal(snap.myRoundMessage?.id, held.id, "author can access held opinion for editing");
+    assert.equal(snap.myRoundMessage.visibility, "held");
     await denied("message", {
       room_id: room.id,
       content: "같은 차례 재발언",
@@ -231,7 +233,34 @@ if (mode === "setup") {
       snap.messages.some((m) => m.id === held.id),
       false,
     );
+    const edit = {
+      room_id: room.id,
+      message_id: held.id,
+      expected_round: 2,
+      expected_edit_id: null,
+      client_id: crypto.randomUUID(),
+      content: "꽃밭에 심을 꽃의 종류를 함께 정하면 좋겠어요.",
+    };
+    const edited = await good("edit_message", edit, guest.token);
+    assert.equal(edited.id, held.id);
+    assert.equal(edited.visibility, "visible");
+    const updated = await good("snapshot", {
+      room_id: room.id,
+      sync: {
+        after: snap.messages.at(-1)?.id || 0,
+        epoch: snap.room.messages_epoch,
+        host: false,
+        version: snap.version,
+      },
+    }, guest.token);
+    assert.equal(updated.messagesReset, true);
+    assert.deepEqual(updated.messages.filter((m) => m.id === held.id).map((m) => m.content), [edit.content]);
     await good("next_round", { room_id: room.id, expected_round: 2 });
+    await denied("edit_message", {
+      ...edit,
+      expected_edit_id: edited.edit_client_id,
+      client_id: crypto.randomUUID(),
+    });
     const concurrent = await Promise.all(
       Array.from({ length: 3 }, () =>
         call(
@@ -250,7 +279,7 @@ if (mode === "setup") {
     snap = await good("snapshot", { room_id: room.id }, guest.token);
     assert.equal(
       snap.messages.filter((m) => m.member_id === member.id).length,
-      2,
+      3,
     );
     await good("room_state", { room_id: room.id, state: "paused" });
     await denied("message", {
@@ -289,6 +318,7 @@ if (mode === "setup") {
           "new-avatar",
           "round-permission-and-stale-round",
           "round-lock-and-held-quota",
+          "held-opinion-edit-and-history-refresh",
           "concurrent-single-speech",
           "history-preserved",
           "selected-presentation-api",
@@ -345,41 +375,46 @@ if (mode === "setup") {
       await client.removeAllChannels();
     }
   } else if (mode === "ai") {
-    await good("room_state", { room_id: state.room.id, state: "active" });
-    const before = await good("snapshot", { room_id: state.room.id });
+    const roomPayload = { room_id: state.room.id };
+    await good("room_state", { ...roomPayload, state: "active" });
+    const before = await good("snapshot", roomPayload);
     const oldReplies = new Set(
       before.messages.filter((m) => m.role === "ai").map((m) => m.id),
     );
     const timer = setInterval(
-      () => good("heartbeat", { room_id: state.room.id }).catch(() => {}),
+      () => good("heartbeat", roomPayload).catch(() => {}),
       15000,
     );
+    async function waitForResult(predicate, label) {
+      let snapshot;
+      for (let i = 0; i < 24; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        snapshot = await good("snapshot", roomPayload);
+        if (predicate(snapshot)) return snapshot;
+      }
+      throw new Error(label + " timeout: " + snapshot?.room.ai_error);
+    }
     try {
       await good("ask_ai", {
-        room_id: state.room.id,
-        content: "꽃밭 아이디어를 간단히 정리해 주세요.",
+        ...roomPayload,
+        content: "꽃밭을 만들 때 가장 먼저 준비할 것은 무엇인가요?",
         client_id: crypto.randomUUID(),
       });
-      for (let i = 0; i < 24; i++) {
-        await new Promise((r) => setTimeout(r, 2500));
-        const snap = await good("snapshot", { room_id: state.room.id });
-        if (
-          snap.summary &&
-          snap.messages.some((m) => m.role === "ai" && !oldReplies.has(m.id))
-        ) {
-          console.log(
-            JSON.stringify({
-              passed: "durable-ai-worker",
-              overview: snap.summary.content.overview,
-              replies: snap.messages.filter((m) => m.role === "ai").length,
-            }),
-          );
-          process.exitCode = 0;
-          break;
-        }
-        if (i === 23)
-          throw new Error("AI summary timeout: " + snap.room.ai_error);
-      }
+      const afterReply = await waitForResult(
+        (snapshot) => snapshot.messages.some((m) => m.role === "ai" && !oldReplies.has(m.id)),
+        "AI reply",
+      );
+      assert.deepEqual(afterReply.summary, before.summary, "asking AI should leave the teacher's summary unchanged");
+      const replies = afterReply.messages.filter((m) => m.role === "ai");
+      await denied("request_summary", { ...roomPayload, client_id: crypto.randomUUID() });
+      await good("request_summary", { ...roomPayload, client_id: crypto.randomUUID() });
+      const afterSummary = await waitForResult(
+        (snapshot) => snapshot.summary && snapshot.summary.created_at !== before.summary?.created_at,
+        "Manual AI summary",
+      );
+      assert.ok(afterSummary.summary.content.overview);
+      assert.deepEqual(afterSummary.messages.filter((m) => m.role === "ai"), replies);
+      console.log("PASS AI question reply and separate teacher-only summary");
     } finally {
       clearInterval(timer);
     }
