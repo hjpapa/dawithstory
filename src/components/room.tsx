@@ -62,6 +62,27 @@ function sameOpinionRound(left: Room, right: Room) {
     left.messages_epoch === right.messages_epoch;
 }
 
+function sameRealtimeScope(left: Room, right: Room) {
+  return sameOpinionRound(left, right) && left.round_open === right.round_open &&
+    JSON.stringify(left.speaker_ids) === JSON.stringify(right.speaker_ids);
+}
+
+function revisionOnlyActivity(left: Room, right: Room) {
+  if (left.id !== right.id || left.revision <= right.revision) return false;
+  const before = right as unknown as Record<string, unknown>;
+  const after = left as unknown as Record<string, unknown>;
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])].every((key) =>
+    key === "revision" || key === "host_seen_at" ||
+    JSON.stringify(before[key]) === JSON.stringify(after[key]),
+  );
+}
+
+type OwnAcknowledgement = {
+  message: Message;
+  refreshId: number;
+  invalidated: boolean;
+};
+
 export function RoomView({
   roomId,
   initial,
@@ -76,12 +97,38 @@ export function RoomView({
   const api = adminView ? adminApi : userApi;
   const [snapshot, setData] = useState<Snapshot | null>(initial || null);
   const [liveOpinions, setLiveOpinions] = useState<Message[]>([]);
+  const [ownAcknowledgement, setOwnAcknowledgement] = useState<OwnAcknowledgement | null>(null);
+  const ownAcknowledgementRef = useRef<OwnAcknowledgement | null>(null);
+  const ownScopeGeneration = useRef(0);
+  const refreshId = useRef(0);
+  const saveOwnAcknowledgement = useCallback((value: OwnAcknowledgement | null) => {
+    ownAcknowledgementRef.current = value;
+    setOwnAcknowledgement(value);
+  }, []);
+  const invalidateOwnAcknowledgement = useCallback(() => {
+    ownScopeGeneration.current += 1;
+    const current = ownAcknowledgementRef.current;
+    if (current && !current.invalidated)
+      saveOwnAcknowledgement({ ...current, invalidated: true });
+  }, [saveOwnAcknowledgement]);
   const snapshotRef = useRef<Snapshot | null>(null);
   const realtimeRoom = useRef<Room | null>(null);
   const invalidatedOpinions = useRef(new Set<number>());
   // Only the server snapshot advances the cursor. A missed Realtime event can
   // still arrive in the next snapshot, even if later opinions are on screen.
   const data = useMemo(() => {
+    const own = ownAcknowledgement?.message;
+    if (snapshot && ownAcknowledgement && !snapshot.isHost && own?.room_id === snapshot.room.id &&
+        own.member_id === snapshot.me?.id && own.round_number === snapshot.room.round_number) {
+      const messages = snapshot.messages.filter((message) => message.id !== own.id);
+      if (!ownAcknowledgement.invalidated && own.visibility === "visible") messages.push(own);
+      return {
+        ...snapshot,
+        messages: messages.sort((a, b) => a.id - b.id),
+        myRoundSubmitted: true,
+        myRoundMessage: ownAcknowledgement.invalidated || own.visibility === "hidden" ? null : own,
+      };
+    }
     if (!snapshot?.isHost || !snapshot.canHeartbeat ||
         snapshot.room.state !== "active" || !liveOpinions.length)
       return snapshot;
@@ -94,10 +141,12 @@ export function RoomView({
       ...snapshot,
       messages: [...snapshot.messages, ...additions].sort((a, b) => a.id - b.id),
     };
-  }, [snapshot, liveOpinions]);
+  }, [snapshot, liveOpinions, ownAcknowledgement]);
   const confirmedRoom = useRef<Pick<Room, "id" | "revision"> | null>(null);
   const refreshInFlight = useRef<Promise<void> | null>(null);
   const refreshAgain = useRef(false);
+  const cancelScheduledRefresh = useRef<(() => void) | null>(null);
+  const scheduleOwnRefresh = useRef<(() => void) | null>(null);
   const [error, setError] = useState("");
   const [sendError, setSendError] = useState("");
   const [info, setInfo] = useState("");
@@ -173,6 +222,7 @@ export function RoomView({
   }, [data?.myPoints]);
   const refresh = useCallback(async () => {
     if (demo) return;
+    cancelScheduledRefresh.current?.();
     if (refreshInFlight.current) {
       refreshAgain.current = true;
       return refreshInFlight.current;
@@ -180,6 +230,7 @@ export function RoomView({
     const run = async () => {
       do {
         refreshAgain.current = false;
+        const requestId = ++refreshId.current;
         try {
           const previous = snapshotRef.current;
           const result = await api<Snapshot & { waiting?: boolean; unchanged?: boolean }>("snapshot", {
@@ -194,6 +245,8 @@ export function RoomView({
             } : {}),
           });
           if (result.unchanged) {
+            if (ownAcknowledgementRef.current && requestId > ownAcknowledgementRef.current.refreshId)
+              saveOwnAcknowledgement(null);
             setError("");
             continue;
           }
@@ -204,9 +257,9 @@ export function RoomView({
           ) continue;
           const observedRoom = realtimeRoom.current;
           if (
-            result.isHost && result.canHeartbeat && observedRoom &&
+            observedRoom?.id === result.room.id &&
             result.room.revision < observedRoom.revision &&
-            !sameOpinionRound(result.room, observedRoom)
+            !sameRealtimeScope(result.room, observedRoom)
           ) continue;
           if (result.messagesReset === false && previous?.room.id === roomId) {
             const messages = new Map(previous.messages.map((message) => [message.id, message]));
@@ -214,6 +267,11 @@ export function RoomView({
             result.messages = [...messages.values()].sort((a, b) => a.id - b.id);
           }
           snapshotRef.current = result;
+          const acknowledged = ownAcknowledgementRef.current;
+          if (acknowledged && (requestId > acknowledged.refreshId ||
+              acknowledged.message.room_id !== result.room.id ||
+              acknowledged.message.round_number !== result.room.round_number))
+            saveOwnAcknowledgement(null);
           setLiveOpinions((current) => {
             if (!current.length) return current;
             if (!result.isHost || !result.canHeartbeat || !previous ||
@@ -238,6 +296,7 @@ export function RoomView({
           setData(null);
           setLiveOpinions([]);
           snapshotRef.current = null;
+          saveOwnAcknowledgement(null);
         }
       } while (refreshAgain.current);
     };
@@ -247,7 +306,7 @@ export function RoomView({
     } finally {
       refreshInFlight.current = null;
     }
-  }, [roomId, demo, api]);
+  }, [roomId, demo, api, saveOwnAcknowledgement]);
   const realtimeRole = snapshot?.room.id === roomId
     ? snapshot.isHost ? "host" : "member"
     : null;
@@ -259,13 +318,42 @@ export function RoomView({
     let disposed = false;
     let channel: RealtimeChannel | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
-    const scheduleRefresh = () => {
-      if (disposed || timeout !== undefined) return;
-      timeout = setTimeout(() => {
-        timeout = undefined;
-        void refresh();
-      }, 100);
+    let backgroundDeadline: number | undefined;
+    let backgroundEarliest = 0;
+    let urgentQueued = false;
+    const cancelScheduled = () => {
+      clearTimeout(timeout);
+      timeout = undefined;
+      backgroundDeadline = undefined;
+      backgroundEarliest = 0;
+      urgentQueued = false;
     };
+    cancelScheduledRefresh.current = cancelScheduled;
+    const flush = () => {
+      cancelScheduled();
+      if (!disposed) void refresh();
+    };
+    const scheduleRefresh = (priority: "background" | "urgent" | "own" = "urgent") => {
+      if (disposed || urgentQueued) return;
+      const now = Date.now();
+      if (priority === "urgent") {
+        cancelScheduled();
+        urgentQueued = true;
+        timeout = setTimeout(flush, 100);
+        return;
+      }
+      if (priority === "own") {
+        // Let the remaining students finish writing before refreshing the sender.
+        backgroundEarliest = now + 800 + Math.random() * 400;
+        backgroundDeadline = now + 1500;
+      } else {
+        backgroundDeadline ??= now + 1200;
+      }
+      clearTimeout(timeout);
+      const due = Math.max(backgroundEarliest, Math.min(now + 500, backgroundDeadline));
+      timeout = setTimeout(flush, Math.max(0, due - now));
+    };
+    scheduleOwnRefresh.current = () => scheduleRefresh("own");
     const subscribe = async () => {
       if (!realtimeRole) return;
       const { data: { session } } = await client.auth.getSession();
@@ -288,19 +376,27 @@ export function RoomView({
               changedRoom.revision >= (current?.revision ?? -1)
             ) {
               realtimeRoom.current = changedRoom;
-              if (current && !sameOpinionRound(changedRoom, current))
+              if (current && !sameRealtimeScope(changedRoom, current)) {
+                invalidateOwnAcknowledgement();
                 setLiveOpinions((opinions) => opinions.length ? [] : opinions);
+              }
             }
             // A heartbeat updates host_seen_at without changing the displayed room.
             if (eventType === "UPDATE" && current?.id === roomId && sameRoomVersion(changedRoom, current))
               return;
-            scheduleRefresh();
+            scheduleRefresh(eventType === "UPDATE" && current && revisionOnlyActivity(changedRoom, current)
+              ? "background" : "urgent");
           },
         )
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "members", filter: `room_id=eq.${roomId}` },
-          scheduleRefresh,
+          ({ new: member, old: previous }: RealtimePostgresChangesPayload<Snapshot["members"][number]>) => {
+            if (("id" in member && member.id === snapshotRef.current?.me?.id) ||
+                ("id" in previous && previous.id === snapshotRef.current?.me?.id))
+              invalidateOwnAcknowledgement();
+            scheduleRefresh("urgent");
+          },
         );
       // Every saved opinion also changes the room revision. Participants need
       // that one signal; only teachers use message rows for immediate previews.
@@ -343,7 +439,9 @@ export function RoomView({
                   : opinions);
               }
             }
-            scheduleRefresh();
+            scheduleRefresh(change.eventType === "INSERT" && change.new.role === "member" &&
+              change.new.visibility === "visible" && change.new.round_number === current?.room.round_number
+              ? "background" : "urgent");
           },
         );
       roomChannel.subscribe((status: string) => {
@@ -355,10 +453,12 @@ export function RoomView({
     return () => {
       disposed = true;
       clearInterval(interval);
-      clearTimeout(timeout);
+      cancelScheduled();
+      if (cancelScheduledRefresh.current === cancelScheduled) cancelScheduledRefresh.current = null;
+      scheduleOwnRefresh.current = null;
       if (channel) void client.removeChannel(channel);
     };
-  }, [refresh, roomId, demo, realtimeRole]);
+  }, [refresh, roomId, demo, realtimeRole, invalidateOwnAcknowledgement]);
   const streamOpinions = !demo && !adminView && snapshot?.isHost === true &&
     snapshot.canHeartbeat === true && snapshot.room.state === "active";
   useEffect(() => {
@@ -682,6 +782,7 @@ export function RoomView({
     const content = composerText;
     const messageStance = data.room.kind === "debate" ? composerStance : null;
     const isAiRequest = ask && !editing;
+    const sendingScope = ownScopeGeneration.current;
     setBusy(true);
     setSendError("");
     setInfo("");
@@ -738,7 +839,7 @@ export function RoomView({
         ]);
         if (pendingSend.current?.signature !== signature)
           pendingSend.current = { signature, id: crypto.randomUUID() };
-        const result = await api<{ visibility?: string; safety_reason?: string }>(
+        const result = await api<Message>(
           editing ? "edit_message" : isAiRequest ? "ask_ai" : "message",
           {
             room_id: roomId,
@@ -760,7 +861,18 @@ export function RoomView({
         else if (isAiRequest) setInfo("이야기별에게 요청했어요. 잠시 기다려 주세요.");
         else if (editing) setInfo("의견을 수정했어요.");
         else setInfo("의견을 저장했어요.");
-        await refresh();
+        if (!isAiRequest && !data.isHost && result.role === "member" &&
+            result.room_id === roomId && result.member_id === data.me?.id &&
+            result.round_number === data.room.round_number && Number.isSafeInteger(result.id)) {
+          const observed = realtimeRoom.current;
+          const invalidated = sendingScope !== ownScopeGeneration.current ||
+            (!!observed && !sameRealtimeScope(observed, data.room));
+          saveOwnAcknowledgement({ message: result, refreshId: refreshId.current, invalidated });
+          if (invalidated || !scheduleOwnRefresh.current) void refresh();
+          else scheduleOwnRefresh.current();
+        } else {
+          await refresh();
+        }
       }
       if (editing) setEditDraft(null);
       else setText((current) => clearSentDraft(current, content));
