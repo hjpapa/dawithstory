@@ -248,8 +248,11 @@ export function RoomView({
       refreshInFlight.current = null;
     }
   }, [roomId, demo, api]);
+  const realtimeRole = snapshot?.room.id === roomId
+    ? snapshot.isHost ? "host" : "member"
+    : null;
   useEffect(() => {
-    refresh();
+    if (snapshotRef.current?.room.id !== roomId) void refresh();
     if (demo) return;
     const client = supabase();
     const interval = setInterval(refresh, 14000 + Math.random() * 2000);
@@ -264,14 +267,16 @@ export function RoomView({
       }, 100);
     };
     const subscribe = async () => {
+      if (!realtimeRole) return;
       const { data: { session } } = await client.auth.getSession();
       if (!session || disposed) return;
       await client.realtime.setAuth(session.access_token);
       if (disposed) return;
-      channel = client
-        .channel("room:" + roomId, {
-          config: { postgres_changes_options: { wait: true } },
-        })
+      const roomChannel = client.channel("room:" + roomId, {
+        config: { postgres_changes_options: { wait: true } },
+      });
+      channel = roomChannel;
+      roomChannel
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "rooms", filter: `id=eq.${roomId}` },
@@ -296,8 +301,10 @@ export function RoomView({
           "postgres_changes",
           { event: "*", schema: "public", table: "members", filter: `room_id=eq.${roomId}` },
           scheduleRefresh,
-        )
-        .on(
+        );
+      // Every saved opinion also changes the room revision. Participants need
+      // that one signal; only teachers use message rows for immediate previews.
+      if (realtimeRole === "host") roomChannel.on(
           "postgres_changes",
           { event: "*", schema: "public", table: "messages", filter: `room_id=eq.${roomId}` },
           (change: RealtimePostgresChangesPayload<Message>) => {
@@ -338,8 +345,8 @@ export function RoomView({
             }
             scheduleRefresh();
           },
-        )
-        .subscribe((status: string) => {
+        );
+      roomChannel.subscribe((status: string) => {
           if (!disposed) setLiveOpinions((opinions) => opinions.length ? [] : opinions);
           if (status === "SUBSCRIBED") scheduleRefresh();
         });
@@ -351,7 +358,7 @@ export function RoomView({
       clearTimeout(timeout);
       if (channel) void client.removeChannel(channel);
     };
-  }, [refresh, roomId, demo]);
+  }, [refresh, roomId, demo, realtimeRole]);
   const streamOpinions = !demo && !adminView && snapshot?.isHost === true &&
     snapshot.canHeartbeat === true && snapshot.room.state === "active";
   useEffect(() => {
