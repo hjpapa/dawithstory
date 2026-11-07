@@ -10,8 +10,6 @@ const headers = {
   "Content-Type": "application/json",
   "Cache-Control": "no-store",
 };
-const json = (value: unknown, status = 200) =>
-  new Response(JSON.stringify(value), { status, headers });
 const safe = (value: unknown, max = 2000) =>
   typeof value === "string" ? value.trim().slice(0, max) : "";
 const uuid =
@@ -215,13 +213,32 @@ async function snapshot(
 const processJobs = createJobProcessor({ db, readMessages });
 
 Deno.serve(async (req) => {
+  const started = performance.now();
+  const timings: string[] = [];
+  const measure = async <T>(name: string, operation: () => PromiseLike<T>): Promise<T> => {
+    const start = performance.now();
+    try {
+      return await operation();
+    } finally {
+      timings.push(`${name};dur=${(performance.now() - start).toFixed(1)}`);
+    }
+  };
+  // Durations only. Never include user content, identifiers, or credentials.
+  const json = (value: unknown, status = 200) =>
+    new Response(JSON.stringify(value), {
+      status,
+      headers: {
+        ...headers,
+        "Server-Timing": [...timings, `edge_total;dur=${(performance.now() - started).toFixed(1)}`].join(", "),
+      },
+    });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
   try {
     const raw = await req.text();
     if (raw.length > 20000) return json({ error: "내용이 너무 길어요." }, 413);
     const p = JSON.parse(raw);
     const action = safe(p.action, 40);
-    const config = check(await db.rpc("story_config"));
+    const config = check(await measure("config", () => db.rpc("story_config")));
     const adminToken = req.headers.get("x-story-admin");
     const admin =
       !!adminToken && (await hash(adminToken)) === config.backend_hash;
@@ -302,7 +319,7 @@ Deno.serve(async (req) => {
     if (!admin) {
       const bearer = req.headers.get("authorization")?.replace(/^Bearer /i, "");
       if (!bearer) return json({ error: "로그인이 필요해요." }, 401);
-      const result = await db.auth.getUser(bearer);
+      const result = await measure("auth", () => db.auth.getUser(bearer));
       if (result.error || !result.data.user)
         return json({ error: "로그인이 만료됐어요. 다시 접속해 주세요." }, 401);
       user = result.data.user;
@@ -312,10 +329,10 @@ Deno.serve(async (req) => {
       if (
         !uuid.test(claims.session_id || "") ||
         !check(
-          await db.rpc("story_session_valid", {
+          await measure("session", () => db.rpc("story_session_valid", {
             p_user: user.id,
             p_session: claims.session_id,
-          }),
+          })),
         )
       )
         return json(
@@ -482,7 +499,7 @@ Deno.serve(async (req) => {
       throw new Error("대화방 주소를 확인해 주세요.");
     if (action === "snapshot")
       return json(
-        await snapshot(p.room_id, user?.id || null, admin, config, !!p.export, p.sync),
+        await measure("snapshot", () => snapshot(p.room_id, user?.id || null, admin, config, !!p.export, p.sync)),
       );
     if (
       action === "create_room" &&
@@ -505,7 +522,7 @@ Deno.serve(async (req) => {
           (p.expected_edit_id != null && !uuid.test(p.expected_edit_id)))
       )
         throw new Error("수정할 의견을 다시 확인해 주세요.");
-      const access = await getRoomAccess(p.room_id, user?.id || null, admin);
+      const access = await measure("access", () => getRoomAccess(p.room_id, user?.id || null, admin));
       if (
         access.room.state !== "active" ||
         new Date(access.room.host_seen_at).getTime() < Date.now() - 60000
@@ -525,11 +542,11 @@ Deno.serve(async (req) => {
         throw new Error("현재 열려 있는 장의 내 의견만 수정할 수 있어요.");
       const localReason = safety(p.content);
       const key = !localReason && (config.ai_live_enabled === "true" || access.room.is_demo)
-        ? check(await db.rpc("story_ai_key"))
+        ? check(await measure("ai_key", () => db.rpc("story_ai_key")))
         : null;
       const { reason, degraded } = localReason
         ? { reason: localReason, degraded: false }
-        : await incomingSafety(key, p.content, action === "ask_ai");
+        : await measure("moderation", () => incomingSafety(key, p.content, action === "ask_ai"));
       if (action === "ask_ai" && reason) throw new Error(reason);
       p.visibility = reason ? "held" : "visible";
       p.safety_reason = reason || (degraded ? "외부 안전 검사가 지연되어 기본 검사만 적용했어요. 진행자가 확인해 주세요." : null);
@@ -561,12 +578,12 @@ Deno.serve(async (req) => {
       throw new Error("지원하지 않는 요청이에요.");
     // Never pass caller-controlled role/identity values to database authority functions.
     const result = check(
-      await db.rpc("story_mutate", {
+      await measure("mutate", () => db.rpc("story_mutate", {
         p_actor: user?.id || null,
         p_admin: admin,
         p_action: action,
         p,
-      }),
+      })),
     );
     if (["ask_ai", "request_summary", "review_retry"].includes(action))
       EdgeRuntime.waitUntil(processJobs());

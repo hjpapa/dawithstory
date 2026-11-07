@@ -20,6 +20,14 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
       create function auth.jwt() returns jsonb language sql stable as $$ select coalesce(nullif(current_setting('request.jwt.claims',true),''),'{}')::jsonb $$;
       create function auth.uid() returns uuid language sql stable as $$ select (auth.jwt()->>'sub')::uuid $$;
       grant usage on schema auth, public to authenticated, anon, service_role;
+      create schema realtime;
+      create table realtime.messages(topic text not null, extension text not null, payload jsonb, event text, private boolean);
+      alter table realtime.messages enable row level security;
+      grant usage on schema realtime to authenticated, anon, service_role;
+      grant select, insert on realtime.messages to authenticated;
+      create function realtime.topic() returns text language sql stable as $$ select current_setting('realtime.topic', true) $$;
+      create function realtime.send(payload jsonb, event text, topic text, private boolean)
+      returns void language sql as $$ insert into realtime.messages values(topic, 'broadcast', payload, event, private) $$;
     `);
     const schema = (await readFile("supabase/schema.sql", "utf8"))
       .replace(/^create extension if not exists pg_(cron|net).*;$/gm, "")
@@ -50,6 +58,7 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
         "reliability.sql",
         "review.sql",
         "edit-opinions.sql",
+        "opinion-broadcast.sql",
       ]) {
         const sql = (await readFile(`tests/${file}`, "utf8")).replace(
           /^begin;|^rollback;/gm,
@@ -61,6 +70,49 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
         } finally {
           await db.exec("rollback");
         }
+      }
+    });
+
+    await t.test("opinion hints allow only the owning teacher and never client sends", async () => {
+      await db.exec("begin");
+      try {
+        const host = crypto.randomUUID(), otherHost = crypto.randomUUID(), student = crypto.randomUUID();
+        const hostSession = crypto.randomUUID(), otherSession = crypto.randomUUID(), studentSession = crypto.randomUUID();
+        const room = crypto.randomUUID(), otherRoom = crypto.randomUUID();
+        await db.query("insert into auth.users(id) values($1),($2),($3)", [host, otherHost, student]);
+        await db.query("insert into auth.sessions(id,user_id) values($1,$2),($3,$4),($5,$6)", [hostSession,host,otherSession,otherHost,studentSession,student]);
+        await db.query("insert into public.profiles(id,email,status) values($1,'hint-owner@example.invalid','approved'),($2,'hint-other@example.invalid','approved')", [host,otherHost]);
+        await db.query("insert into public.rooms(id,owner_id,title,topic,kind,state) values($1,$2,'test','test','discussion','active'),($3,$4,'other','other','discussion','active')", [room,host,otherRoom,otherHost]);
+        await db.query("insert into public.members(room_id,user_id,nickname,state) values($1,$2,'student','approved')", [room,student]);
+        const topic = `story-room:${room}:opinions`, otherTopic = `story-room:${otherRoom}:opinions`;
+        await db.query("insert into realtime.messages(topic,extension,payload,event,private) values($1,'broadcast','{}','opinion_changed',true),($2,'broadcast','{}','opinion_changed',true),($1,'presence','{}','presence',true)", [topic,otherTopic]);
+        const claims = (user: string, session: string) => db.query("select set_config('request.jwt.claims',$1,true)", [JSON.stringify({sub:user,session_id:session,role:"authenticated"})]);
+        await db.query("select set_config('realtime.topic',$1,true)", [topic]);
+        await claims(host,hostSession);
+        await db.exec("set local role authenticated");
+        assert.equal((await db.query("select * from realtime.messages")).rows.length, 1);
+        await db.exec("savepoint forged_hint");
+        await assert.rejects(db.query("insert into realtime.messages(topic,extension,payload,event,private) values($1,'broadcast','{}','opinion_changed',true)", [topic]), /row-level security/);
+        await db.exec("rollback to savepoint forged_hint");
+        for (const [user, session] of [[otherHost,otherSession], [student,studentSession], [host,otherSession]]) {
+          await claims(user,session);
+          assert.equal((await db.query("select * from realtime.messages")).rows.length, 0);
+        }
+        await claims(host,hostSession);
+        await db.query("select set_config('realtime.topic',$1,true)", [otherTopic]);
+        assert.equal((await db.query("select * from realtime.messages")).rows.length, 0);
+        await db.query("select set_config('realtime.topic',$1,true)", [topic]);
+        await db.exec("reset role");
+        await db.query("update public.profiles set status='suspended' where id=$1", [host]);
+        await db.exec("set local role authenticated");
+        assert.equal((await db.query("select * from realtime.messages")).rows.length, 0);
+        await db.exec("reset role");
+        await db.query("update public.profiles set status='approved' where id=$1", [host]);
+        await db.query("delete from auth.sessions where id=$1", [hostSession]);
+        await db.exec("set local role authenticated");
+        assert.equal((await db.query("select * from realtime.messages")).rows.length, 0);
+      } finally {
+        await db.exec("reset role; rollback");
       }
     });
 

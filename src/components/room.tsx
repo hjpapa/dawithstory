@@ -78,6 +78,7 @@ export function RoomView({
   const [liveOpinions, setLiveOpinions] = useState<Message[]>([]);
   const snapshotRef = useRef<Snapshot | null>(null);
   const realtimeRoom = useRef<Room | null>(null);
+  const invalidatedOpinions = useRef(new Set<number>());
   // Only the server snapshot advances the cursor. A missed Realtime event can
   // still arrive in the next snapshot, even if later opinions are on screen.
   const data = useMemo(() => {
@@ -309,6 +310,7 @@ export function RoomView({
                   opinion.room_id === roomId && opinion.role === "member" &&
                   opinion.visibility === "visible" && opinion.member_id &&
                   Number.isSafeInteger(opinion.id) &&
+                  !invalidatedOpinions.current.has(opinion.id) &&
                   opinion.round_number === current.room.round_number &&
                   !current.messages.some((message) => message.id === opinion.id) &&
                   (!observed || observed.revision < current.room.revision ||
@@ -328,6 +330,7 @@ export function RoomView({
                 }
               } else {
                 const id = change.eventType === "UPDATE" ? change.new.id : change.old.id;
+                if (id != null) invalidatedOpinions.current.add(id);
                 setLiveOpinions((opinions) => opinions.some((message) => message.id === id)
                   ? opinions.filter((message) => message.id !== id)
                   : opinions);
@@ -349,6 +352,127 @@ export function RoomView({
       if (channel) void client.removeChannel(channel);
     };
   }, [refresh, roomId, demo]);
+  const streamOpinions = !demo && !adminView && snapshot?.isHost === true &&
+    snapshot.canHeartbeat === true && snapshot.room.state === "active";
+  useEffect(() => {
+    if (!streamOpinions) return;
+    const client = supabase();
+    let disposed = false;
+    let generation = 0;
+    let viewerId = "";
+    let channel: RealtimeChannel | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let reading = false;
+    const pending = new Set<number>();
+    const scheduleRead = () => {
+      if (disposed || reading || timer !== undefined || !pending.size) return;
+      timer = setTimeout(() => { timer = undefined; void readOpinions(); }, 25);
+    };
+    // Broadcast carries identifiers only. Recheck room and message RLS in one
+    // database snapshot before rendering any content, even after revocation.
+    const readOpinions = async () => {
+      const ids = [...pending].slice(0, 100);
+      for (const id of ids) pending.delete(id);
+      const version = generation;
+      reading = true;
+      try {
+        const { data: result, error } = await client.from("rooms")
+          .select("*,messages(id,room_id,role,member_id,nickname,avatar,content,stance,visibility,round_number,created_at)")
+          .eq("id", roomId)
+          .eq("owner_id", viewerId)
+          .in("messages.id", ids)
+          .eq("messages.role", "member")
+          .eq("messages.visibility", "visible")
+          .maybeSingle();
+        if (disposed || version !== generation) return;
+        const current = snapshotRef.current;
+        if (error || !result || !current?.isHost || !current.canHeartbeat) {
+          setLiveOpinions([]);
+          void refresh();
+          return;
+        }
+        const { messages, ...room } = result;
+        if (room.revision >= (realtimeRoom.current?.revision ?? -1))
+          realtimeRoom.current = room as Room;
+        if (!sameOpinionRound(current.room, room as Room) || room.state !== "active") {
+          setLiveOpinions([]);
+          void refresh();
+          return;
+        }
+        const observed = realtimeRoom.current;
+        if (observed && !sameOpinionRound(room as Room, observed)) return;
+        const additions = (messages as Message[]).filter((message) =>
+          message.round_number === room.round_number && message.member_id &&
+          !invalidatedOpinions.current.has(message.id) &&
+          !current.messages.some((known) => known.id === message.id),
+        );
+        setLiveOpinions((opinions) => {
+          const merged = new Map(opinions.map((message) => [message.id, message]));
+          for (const message of additions) merged.set(message.id, message);
+          return [...merged.values()];
+        });
+      } catch {
+        // Regular authenticated snapshots and Postgres Changes remain available.
+        if (!disposed) void refresh();
+      } finally {
+        reading = false;
+        scheduleRead();
+      }
+    };
+    const subscribe = async () => {
+      const { data: { session } } = await client.auth.getSession();
+      if (!session || disposed) return;
+      viewerId = session.user.id;
+      await client.realtime.setAuth(session.access_token);
+      if (disposed) return;
+      channel = client.channel(`story-room:${roomId}:opinions`, { config: { private: true } })
+        .on("broadcast", { event: "opinion_changed" }, ({ payload }: { payload: {
+          room_id?: string; message_id: number; operation?: string; round_number?: number;
+        } }) => {
+          if (disposed || payload?.room_id !== roomId || !Number.isSafeInteger(payload.message_id)) return;
+          if (payload.operation !== "INSERT") {
+            generation += 1;
+            invalidatedOpinions.current.add(payload.message_id);
+            pending.delete(payload.message_id);
+            setLiveOpinions((opinions) => opinions.filter((message) => message.id !== payload.message_id));
+            void refresh();
+            return;
+          }
+          const current = snapshotRef.current;
+          if (current?.room.round_number !== payload.round_number ||
+              invalidatedOpinions.current.has(payload.message_id)) return;
+          pending.add(payload.message_id);
+          scheduleRead();
+        })
+        .on("broadcast", { event: "room_changed" }, ({ payload }: { payload: {
+          room_id?: string; messages_epoch: number; round_number: number;
+          state: Room["state"]; round_open: boolean; revision: number;
+        } }) => {
+          const current = snapshotRef.current?.room;
+          if (payload?.room_id !== roomId || !current ||
+              !Number.isSafeInteger(payload.revision) ||
+              payload.revision < current.revision ||
+              payload.revision < (realtimeRoom.current?.revision ?? -1)) return;
+          realtimeRoom.current = { ...current, ...payload, id: roomId };
+          generation += 1;
+          pending.clear();
+          setLiveOpinions([]);
+          void refresh();
+        })
+        .subscribe((status: string) => {
+          if (disposed || status === "SUBSCRIBED") return;
+          generation += 1;
+          pending.clear();
+          setLiveOpinions([]);
+        });
+    };
+    void subscribe().catch(() => {});
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+      if (channel) void client.removeChannel(channel);
+    };
+  }, [streamOpinions, refresh, roomId]);
   const probeRoomChanges = !demo && data?.canHeartbeat === true && data.room.state === "active" &&
     data.members.some((member) => member.state === "approved");
   useEffect(() => {
