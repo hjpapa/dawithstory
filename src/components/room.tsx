@@ -375,30 +375,26 @@ export function RoomView({
       if (disposed || reading || timer !== undefined || !pending.size) return;
       timer = setTimeout(() => { timer = undefined; void readOpinions(); }, 25);
     };
-    // Broadcast carries identifiers only. Recheck room and message RLS in one
-    // database snapshot before rendering any content, even after revocation.
+    // Broadcast carries identifiers only. The RPC rechecks the current session
+    // and owning teacher once, then returns visible opinions in one snapshot.
     const readOpinions = async () => {
       const ids = [...pending].slice(0, 100);
       for (const id of ids) pending.delete(id);
       const version = generation;
       reading = true;
       try {
-        const { data: result, error } = await client.from("rooms")
-          .select("*,messages(id,room_id,role,member_id,nickname,avatar,content,stance,visibility,round_number,created_at)")
-          .eq("id", roomId)
-          .eq("owner_id", viewerId)
-          .in("messages.id", ids)
-          .eq("messages.role", "member")
-          .eq("messages.visibility", "visible")
-          .maybeSingle();
+        const { data: result, error } = await client.rpc("story_teacher_opinions", {
+          p_room: roomId, p_ids: ids,
+        });
         if (disposed || version !== generation) return;
         const current = snapshotRef.current;
-        if (error || !result || !current?.isHost || !current.canHeartbeat) {
+        if (error || !result || result.room?.owner_id !== viewerId ||
+            result.room?.id !== roomId || !current?.isHost || !current.canHeartbeat) {
           setLiveOpinions([]);
           void refresh();
           return;
         }
-        const { messages, ...room } = result;
+        const { messages, room } = result as { room: Room; messages: Message[] };
         if (room.revision >= (realtimeRoom.current?.revision ?? -1))
           realtimeRoom.current = room as Room;
         if (!sameOpinionRound(current.room, room as Room) || room.state !== "active") {

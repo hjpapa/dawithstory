@@ -6,6 +6,7 @@ import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 import { createJobProcessor } from "../supabase/functions/story-api/worker";
 import { ProviderError } from "../supabase/functions/story-api/provider";
 import { pgApi } from "./helpers/pg-api";
+import { testMessageContext, testTeacherOpinionBatch } from "./helpers/opinion-context";
 
 test("PostgreSQL migrations and access/queue regressions", async (t) => {
   const db = await PGlite.create({ extensions: { pgcrypto } });
@@ -72,6 +73,9 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
         }
       }
     });
+
+    await t.test("teacher opinion batches preserve ownership, session and current visible scope", () => testTeacherOpinionBatch(db));
+    await t.test("message context is service-only, fresh and matches room access", () => testMessageContext(db));
 
     await t.test("opinion hints allow only the owning teacher and never client sends", async () => {
       await db.exec("begin");

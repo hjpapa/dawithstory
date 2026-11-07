@@ -90,9 +90,11 @@ async function snapshot(
   exporting = false,
   sync?: { after?: number; epoch?: number; host?: boolean; version?: string },
   retry = true,
+  initialAccess?: Awaited<ReturnType<typeof getRoomAccess>>,
 ) {
-  const access = await getRoomAccess(roomId, actor, admin);
-  const { room, isHost, me } = access;
+  const { room, isHost, me } = initialAccess || await getRoomAccess(roomId, actor, admin);
+  // Keep the server-only preflight fields (including the provider key) out of snapshots.
+  const access = { room, isHost, me };
   const aiEnabled = config.ai_live_enabled === "true" || room.is_demo;
   const canRequestSummary = isHost && !admin && room.owner_id === actor;
   const reviewJob = room.state === "ended" ? check(await db.from("ai_jobs").select("status,error").eq("room_id", roomId).eq("kind", "final").order("created_at", { ascending: false }).limit(1).maybeSingle()) : null;
@@ -238,8 +240,34 @@ Deno.serve(async (req) => {
     if (raw.length > 20000) return json({ error: "내용이 너무 길어요." }, 413);
     const p = JSON.parse(raw);
     const action = safe(p.action, 40);
-    const config = check(await measure("config", () => db.rpc("story_config")));
     const adminToken = req.headers.get("x-story-admin");
+    let user: any = null;
+    let roomContext: any = null;
+    // The user API verifies the JWT before the service-only preflight combines
+    // current session, room access, configuration, and moderation-key reads.
+    if (!adminToken && ["message", "edit_message", "ask_ai", "snapshot"].includes(action)) {
+      const bearer = req.headers.get("authorization")?.replace(/^Bearer /i, "");
+      if (!bearer) return json({ error: "로그인이 필요해요." }, 401);
+      const result = await measure("auth", () => db.auth.getUser(bearer));
+      if (result.error || !result.data.user)
+        return json({ error: "로그인이 만료됐어요. 다시 접속해 주세요." }, 401);
+      user = result.data.user;
+      const claims = JSON.parse(
+        atob(bearer.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")),
+      );
+      if (!uuid.test(claims.session_id || ""))
+        return json({ error: "로그인이 만료됐어요. 다시 로그인해 주세요." }, 401);
+      if (!uuid.test(p.room_id || "")) throw new Error("대화방 주소를 확인해 주세요.");
+      roomContext = check(await measure("context", () => db.rpc("story_message_context", {
+        p_actor: user.id, p_session: claims.session_id, p_room: p.room_id,
+        ...(action === "snapshot" ? { p_include_ai_key: false } : {}),
+      })));
+      if (!roomContext)
+        return json({ error: "로그인이 만료됐어요. 다시 로그인해 주세요." }, 401);
+    }
+    const config = roomContext
+      ? { ai_live_enabled: roomContext.aiEnabled ? "true" : "false" }
+      : check(await measure("config", () => db.rpc("story_config")));
     const admin =
       !!adminToken && (await hash(adminToken)) === config.backend_hash;
     if (action === "register") {
@@ -315,8 +343,7 @@ Deno.serve(async (req) => {
       );
       return json({ ok: allowed }, allowed ? 200 : 429);
     }
-    let user: any = null;
-    if (!admin) {
+    if (!admin && !roomContext) {
       const bearer = req.headers.get("authorization")?.replace(/^Bearer /i, "");
       if (!bearer) return json({ error: "로그인이 필요해요." }, 401);
       const result = await measure("auth", () => db.auth.getUser(bearer));
@@ -499,7 +526,7 @@ Deno.serve(async (req) => {
       throw new Error("대화방 주소를 확인해 주세요.");
     if (action === "snapshot")
       return json(
-        await measure("snapshot", () => snapshot(p.room_id, user?.id || null, admin, config, !!p.export, p.sync)),
+        await measure("snapshot", () => snapshot(p.room_id, user?.id || null, admin, config, !!p.export, p.sync, true, roomContext)),
       );
     if (
       action === "create_room" &&
@@ -522,7 +549,7 @@ Deno.serve(async (req) => {
           (p.expected_edit_id != null && !uuid.test(p.expected_edit_id)))
       )
         throw new Error("수정할 의견을 다시 확인해 주세요.");
-      const access = await measure("access", () => getRoomAccess(p.room_id, user?.id || null, admin));
+      const access = roomContext || await measure("access", () => getRoomAccess(p.room_id, user?.id || null, admin));
       if (
         access.room.state !== "active" ||
         new Date(access.room.host_seen_at).getTime() < Date.now() - 60000
@@ -542,7 +569,7 @@ Deno.serve(async (req) => {
         throw new Error("현재 열려 있는 장의 내 의견만 수정할 수 있어요.");
       const localReason = safety(p.content);
       const key = !localReason && (config.ai_live_enabled === "true" || access.room.is_demo)
-        ? check(await measure("ai_key", () => db.rpc("story_ai_key")))
+        ? (roomContext ? roomContext.aiKey : check(await measure("ai_key", () => db.rpc("story_ai_key"))))
         : null;
       const { reason, degraded } = localReason
         ? { reason: localReason, degraded: false }
