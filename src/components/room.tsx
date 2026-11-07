@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RealtimeChannel, RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import Link from "next/link";
 import {
@@ -55,6 +55,13 @@ function sameRoomVersion(left: RoomVersion, right: RoomVersion) {
     left.ai_error === right.ai_error;
 }
 
+function sameOpinionRound(left: Room, right: Room) {
+  return left.id === right.id &&
+    left.state === right.state &&
+    left.round_number === right.round_number &&
+    left.messages_epoch === right.messages_epoch;
+}
+
 export function RoomView({
   roomId,
   initial,
@@ -67,8 +74,26 @@ export function RoomView({
   adminView?: boolean;
 }) {
   const api = adminView ? adminApi : userApi;
-  const [data, setData] = useState<Snapshot | null>(initial || null);
+  const [snapshot, setData] = useState<Snapshot | null>(initial || null);
+  const [liveOpinions, setLiveOpinions] = useState<Message[]>([]);
   const snapshotRef = useRef<Snapshot | null>(null);
+  const realtimeRoom = useRef<Room | null>(null);
+  // Only the server snapshot advances the cursor. A missed Realtime event can
+  // still arrive in the next snapshot, even if later opinions are on screen.
+  const data = useMemo(() => {
+    if (!snapshot?.isHost || !snapshot.canHeartbeat ||
+        snapshot.room.state !== "active" || !liveOpinions.length)
+      return snapshot;
+    const known = new Set(snapshot.messages.map((message) => message.id));
+    const additions = liveOpinions.filter(
+      (message) => message.round_number === snapshot.room.round_number && !known.has(message.id),
+    );
+    if (!additions.length) return snapshot;
+    return {
+      ...snapshot,
+      messages: [...snapshot.messages, ...additions].sort((a, b) => a.id - b.id),
+    };
+  }, [snapshot, liveOpinions]);
   const confirmedRoom = useRef<Pick<Room, "id" | "revision"> | null>(null);
   const refreshInFlight = useRef<Promise<void> | null>(null);
   const refreshAgain = useRef(false);
@@ -176,12 +201,26 @@ export function RoomView({
             confirmedRoom.current?.id === result.room.id &&
             result.room.revision < confirmedRoom.current.revision
           ) continue;
+          const observedRoom = realtimeRoom.current;
+          if (
+            result.isHost && result.canHeartbeat && observedRoom &&
+            result.room.revision < observedRoom.revision &&
+            !sameOpinionRound(result.room, observedRoom)
+          ) continue;
           if (result.messagesReset === false && previous?.room.id === roomId) {
             const messages = new Map(previous.messages.map((message) => [message.id, message]));
             for (const message of result.messages) messages.set(message.id, message);
             result.messages = [...messages.values()].sort((a, b) => a.id - b.id);
           }
           snapshotRef.current = result;
+          setLiveOpinions((current) => {
+            if (!current.length) return current;
+            if (!result.isHost || !result.canHeartbeat || !previous ||
+                !sameOpinionRound(previous.room, result.room))
+              return [];
+            const received = new Set(result.messages.map((message) => message.id));
+            return current.filter((message) => !received.has(message.id));
+          });
           setSelected((current) => {
             if (!current) return null;
             const latest = result.messages?.find((message) => message.id === current.message.id);
@@ -196,6 +235,7 @@ export function RoomView({
         } catch (e) {
           setError((e as Error).message);
           setData(null);
+          setLiveOpinions([]);
           snapshotRef.current = null;
         }
       } while (refreshAgain.current);
@@ -236,6 +276,15 @@ export function RoomView({
           { event: "*", schema: "public", table: "rooms", filter: `id=eq.${roomId}` },
           ({ eventType, new: changedRoom }: RealtimePostgresChangesPayload<Room>) => {
             const current = snapshotRef.current?.room;
+            if (
+              eventType === "UPDATE" && changedRoom.id === roomId &&
+              changedRoom.revision >= (realtimeRoom.current?.revision ?? -1) &&
+              changedRoom.revision >= (current?.revision ?? -1)
+            ) {
+              realtimeRoom.current = changedRoom;
+              if (current && !sameOpinionRound(changedRoom, current))
+                setLiveOpinions((opinions) => opinions.length ? [] : opinions);
+            }
             // A heartbeat updates host_seen_at without changing the displayed room.
             if (eventType === "UPDATE" && current?.id === roomId && sameRoomVersion(changedRoom, current))
               return;
@@ -250,9 +299,45 @@ export function RoomView({
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "messages", filter: `room_id=eq.${roomId}` },
-          scheduleRefresh,
+          (change: RealtimePostgresChangesPayload<Message>) => {
+            const current = snapshotRef.current;
+            if (current?.isHost && current.canHeartbeat && current.room.state === "active") {
+              if (change.eventType === "INSERT") {
+                const opinion = change.new;
+                const observed = realtimeRoom.current;
+                if (
+                  opinion.room_id === roomId && opinion.role === "member" &&
+                  opinion.visibility === "visible" && opinion.member_id &&
+                  Number.isSafeInteger(opinion.id) &&
+                  opinion.round_number === current.room.round_number &&
+                  !current.messages.some((message) => message.id === opinion.id) &&
+                  (!observed || observed.revision < current.room.revision ||
+                    sameOpinionRound(current.room, observed))
+                ) {
+                  const liveOpinion: Message = {
+                    id: opinion.id, room_id: opinion.room_id, role: opinion.role,
+                    member_id: opinion.member_id, nickname: opinion.nickname, avatar: opinion.avatar,
+                    content: opinion.content, stance: opinion.stance, visibility: opinion.visibility,
+                    round_number: opinion.round_number, created_at: opinion.created_at,
+                  };
+                  setLiveOpinions((opinions) =>
+                    opinions.some((message) => message.id === liveOpinion.id)
+                      ? opinions
+                      : [...opinions, liveOpinion],
+                  );
+                }
+              } else {
+                const id = change.eventType === "UPDATE" ? change.new.id : change.old.id;
+                setLiveOpinions((opinions) => opinions.some((message) => message.id === id)
+                  ? opinions.filter((message) => message.id !== id)
+                  : opinions);
+              }
+            }
+            scheduleRefresh();
+          },
         )
         .subscribe((status: string) => {
+          if (!disposed) setLiveOpinions((opinions) => opinions.length ? [] : opinions);
           if (status === "SUBSCRIBED") scheduleRefresh();
         });
     };
