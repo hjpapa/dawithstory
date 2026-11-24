@@ -152,7 +152,8 @@ export function RoomView({
   const [info, setInfo] = useState("");
   const [inviteOrigin, setInviteOrigin] = useState<string | null>(null);
   const [waiting, setWaiting] = useState(false);
-  const [text, setText] = useState("");
+  const [opinionText, setOpinionText] = useState("");
+  const [aiText, setAiText] = useState("");
   const [ask, setAsk] = useState(false);
   const [stance, setStance] = useState("neutral");
   const [editDraft, setEditDraft] = useState<{
@@ -314,18 +315,43 @@ export function RoomView({
     if (snapshotRef.current?.room.id !== roomId) void refresh();
     if (demo) return;
     const client = supabase();
-    const interval = setInterval(refresh, 14000 + Math.random() * 2000);
+    const participant = realtimeRole === "member";
+    // Spread each classroom burst across clients while bounding the wait.
+    const quietWindow = participant ? 150 + Math.random() * 150 : 500;
+    const maxBackgroundWait = participant ? 450 + Math.random() * 150 : 1200;
     let disposed = false;
+    let subscribed = false;
     let channel: RealtimeChannel | undefined;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let backgroundDeadline: number | undefined;
-    let backgroundEarliest = 0;
+    let ownDeadline: number | undefined;
     let urgentQueued = false;
+    const canPoll = () => !document.hidden && navigator.onLine;
+    const schedulePoll = () => {
+      clearTimeout(pollTimer);
+      // Keep normal polling light and recover sooner while Realtime reconnects.
+      const delay = realtimeRole && !adminView && !subscribed
+        ? 4500 + Math.random() * 1500
+        : 14000 + Math.random() * 2000;
+      pollTimer = setTimeout(() => {
+        if (canPoll()) void refresh();
+        schedulePoll();
+      }, delay);
+    };
+    const catchUp = () => {
+      if (!canPoll()) return;
+      void refresh();
+      schedulePoll();
+    };
+    schedulePoll();
+    window.addEventListener("online", catchUp);
+    document.addEventListener("visibilitychange", catchUp);
     const cancelScheduled = () => {
       clearTimeout(timeout);
       timeout = undefined;
       backgroundDeadline = undefined;
-      backgroundEarliest = 0;
+      ownDeadline = undefined;
       urgentQueued = false;
     };
     cancelScheduledRefresh.current = cancelScheduled;
@@ -343,14 +369,16 @@ export function RoomView({
         return;
       }
       if (priority === "own") {
-        // Let the remaining students finish writing before refreshing the sender.
-        backgroundEarliest = now + 800 + Math.random() * 400;
-        backgroundDeadline = now + 1500;
-      } else {
-        backgroundDeadline ??= now + 1200;
+        // The sender already sees the saved opinion. Reconcile it later if
+        // there is no earlier update queued, and let room activity pull it forward.
+        if (timeout !== undefined) return;
+        ownDeadline = now + 800 + Math.random() * 400;
+        timeout = setTimeout(flush, ownDeadline - now);
+        return;
       }
+      backgroundDeadline ??= now + maxBackgroundWait;
       clearTimeout(timeout);
-      const due = Math.max(backgroundEarliest, Math.min(now + 500, backgroundDeadline));
+      const due = Math.min(now + quietWindow, backgroundDeadline, ownDeadline ?? Infinity);
       timeout = setTimeout(flush, Math.max(0, due - now));
     };
     scheduleOwnRefresh.current = () => scheduleRefresh("own");
@@ -445,20 +473,28 @@ export function RoomView({
           },
         );
       roomChannel.subscribe((status: string) => {
-          if (!disposed) setLiveOpinions((opinions) => opinions.length ? [] : opinions);
-          if (status === "SUBSCRIBED") scheduleRefresh();
-        });
+        if (disposed) return;
+        setLiveOpinions((opinions) => opinions.length ? [] : opinions);
+        const ready = status === "SUBSCRIBED";
+        if (ready !== subscribed) {
+          subscribed = ready;
+          schedulePoll();
+        }
+        if (ready) scheduleRefresh();
+      });
     };
     void subscribe().catch(() => {});
     return () => {
       disposed = true;
-      clearInterval(interval);
+      clearTimeout(pollTimer);
+      window.removeEventListener("online", catchUp);
+      document.removeEventListener("visibilitychange", catchUp);
       cancelScheduled();
       if (cancelScheduledRefresh.current === cancelScheduled) cancelScheduledRefresh.current = null;
       scheduleOwnRefresh.current = null;
       if (channel) void client.removeChannel(channel);
     };
-  }, [refresh, roomId, demo, realtimeRole, invalidateOwnAcknowledgement]);
+  }, [refresh, roomId, demo, adminView, realtimeRole, invalidateOwnAcknowledgement]);
   const streamOpinions = !demo && !adminView && snapshot?.isHost === true &&
     snapshot.canHeartbeat === true && snapshot.room.state === "active";
   useEffect(() => {
@@ -780,8 +816,8 @@ export function RoomView({
     if (!data || busy || sendBlocked || editConflict || editUnchanged || !composerText.trim())
       return;
     const content = composerText;
-    const messageStance = data.room.kind === "debate" ? composerStance : null;
     const isAiRequest = ask && !editing;
+    const messageStance = !isAiRequest && data.room.kind === "debate" ? composerStance : null;
     const sendingScope = ownScopeGeneration.current;
     setBusy(true);
     setSendError("");
@@ -870,12 +906,17 @@ export function RoomView({
           saveOwnAcknowledgement({ message: result, refreshId: refreshId.current, invalidated });
           if (invalidated || !scheduleOwnRefresh.current) void refresh();
           else scheduleOwnRefresh.current();
+        } else if (isAiRequest) {
+          void refresh();
         } else {
           await refresh();
         }
       }
       if (editing) setEditDraft(null);
-      else setText((current) => clearSentDraft(current, content));
+      else if (isAiRequest) {
+        setAiText((current) => clearSentDraft(current, content));
+        setAsk(false);
+      } else setOpinionText((current) => clearSentDraft(current, content));
       pendingSend.current = null;
       input.current?.focus();
     } catch (e) {
@@ -997,7 +1038,7 @@ export function RoomView({
   const editing = editableOpinion && editDraft?.original.id === editableOpinion.id
     ? editDraft
     : null;
-  const composerText = editing?.content ?? text;
+  const composerText = editing?.content ?? (ask ? aiText : opinionText);
   const composerStance = editing?.stance ?? stance;
   const editConflict = !!editing &&
     (editableOpinion?.edit_client_id ?? null) !== (editing.original.edit_client_id ?? null) &&
@@ -1428,10 +1469,10 @@ export function RoomView({
                 {editing
                   ? `${room.round_number}번째 차례 · 내 의견을 고쳐요`
                   : ask
-                    ? "이야기별에게 요청해요"
+                    ? "이야기별에게 질문해요"
                     : isHost
                       ? "진행자의 이야기를 전해요"
-                      : `${room.round_number}번째 차례 · 친구의 말에 이어서 대화해요`}
+                      : `${room.round_number}번째 차례 · 내 생각을 나눠요`}
               </span>
               <div className="composer-actions">
                 {editing ? (
@@ -1471,12 +1512,15 @@ export function RoomView({
                       <button
                         type="button"
                         className={"ai-toggle " + (ask ? "on" : "")}
-                        onClick={() => setAsk(!ask)}
+                        onClick={() => {
+                          setAsk((current) => !current);
+                          setSendError("");
+                        }}
                         aria-pressed={ask}
                         disabled={!data.aiEnabled}
                       >
                         <Sparkles size={14} />
-                        이야기별에게
+                        이야기별 도움
                       </button>
                     )}
                   </>
@@ -1508,13 +1552,16 @@ export function RoomView({
             <div className="composer-input">
               <textarea
                 ref={input}
-                aria-label={editing ? "의견 수정 입력" : ask ? "AI에게 요청" : "대화 입력"}
+                aria-label={editing ? "의견 수정 입력" : ask ? "이야기별에게 물어볼 질문" : isHost ? "대화 입력" : "내 의견 입력"}
                 value={roundBlocked && submitted && !pendingOpinion
                   ? currentOpinion?.content ?? ""
                   : composerText}
-                onChange={(e) => editing
-                  ? setEditDraft({ ...editing, content: e.target.value })
-                  : setText(e.target.value)}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (editing) setEditDraft({ ...editing, content: value });
+                  else if (ask) setAiText(value);
+                  else setOpinionText(value);
+                }}
                 onKeyDown={(e) => {
                   if (
                     e.key === "Enter" &&
@@ -1537,7 +1584,7 @@ export function RoomView({
                             ? "이번 차례에 생각을 남겼어요"
                             : "진행자가 발언을 열면 이야기할 수 있어요"
                         : ask
-                          ? "이야기별에게 궁금한 점을 물어보세요"
+                          ? "생각을 정리할 질문이나 힌트를 요청해 보세요"
                           : "친구의 말에 이어 의견, 질문, 반론을 나눠 주세요…"
                 }
                 maxLength={2000}
@@ -1546,7 +1593,7 @@ export function RoomView({
               />
               <button
                 className={`send-button${editing ? " edit-save" : ""}`}
-                aria-label={editing ? "수정 내용 저장" : ask ? "AI 요청 보내기" : "메시지 보내기"}
+                aria-label={editing ? "수정 내용 저장" : ask ? "이야기별에게 질문 보내기" : isHost ? "메시지 보내기" : "내 의견 보내기"}
                 disabled={busy || sendBlocked || editConflict || editUnchanged || !composerText.trim()}
               >
                 {editing ? "저장" : <Send size={20} />}
@@ -1566,11 +1613,13 @@ export function RoomView({
               <span>
                 {editing
                   ? "Enter 저장 · Shift+Enter 줄바꿈"
-                  : !ask && submitted && currentOpinion?.visibility === "held"
-                    ? "진행자가 공개 전에 의견을 확인하고 있어요"
-                    : !isHost && !ask
-                      ? "같은 주제로 대화를 이어가요 · 지난 발언은 기록에 남아요"
-                      : "Enter 전송 · Shift+Enter 줄바꿈"}
+                  : ask
+                    ? "이야기별의 답변은 대화방에 표시돼요"
+                    : submitted && currentOpinion?.visibility === "held"
+                      ? "진행자가 공개 전에 의견을 확인하고 있어요"
+                      : !isHost
+                        ? "같은 주제로 대화를 이어가요 · 지난 발언은 기록에 남아요"
+                        : "Enter 전송 · Shift+Enter 줄바꿈"}
               </span>
               {!sendBlocked && <span>{composerText.length}/2000</span>}
             </div>
