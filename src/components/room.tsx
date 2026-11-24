@@ -47,6 +47,8 @@ import { aiRequestAllowed, clearSentDraft } from "@/lib/composer";
 import { AVATAR_CATALOG } from "../../supabase/functions/story-api/avatars";
 
 type RoomVersion = Pick<Room, "revision" | "state" | "messages_epoch" | "ai_error">;
+type RoomScope = Pick<Room, "id" | "state" | "round_number" | "messages_epoch" | "round_open" | "speaker_ids">;
+type ParticipantOpinionRead = RoomScope & Pick<Room, "revision"> & { messages: Message[] };
 
 function sameRoomVersion(left: RoomVersion, right: RoomVersion) {
   return left.revision === right.revision &&
@@ -55,16 +57,20 @@ function sameRoomVersion(left: RoomVersion, right: RoomVersion) {
     left.ai_error === right.ai_error;
 }
 
-function sameOpinionRound(left: Room, right: Room) {
+function sameOpinionRound(left: RoomScope, right: RoomScope) {
   return left.id === right.id &&
     left.state === right.state &&
     left.round_number === right.round_number &&
     left.messages_epoch === right.messages_epoch;
 }
 
-function sameRealtimeScope(left: Room, right: Room) {
+function sameRealtimeScope(left: RoomScope, right: RoomScope) {
   return sameOpinionRound(left, right) && left.round_open === right.round_open &&
-    JSON.stringify(left.speaker_ids) === JSON.stringify(right.speaker_ids);
+    JSON.stringify(left.speaker_ids ?? null) === JSON.stringify(right.speaker_ids ?? null);
+}
+
+function canPreviewPeerOpinions(snapshot: Snapshot | null): snapshot is Snapshot & { me: NonNullable<Snapshot["me"]> } {
+  return !!snapshot && !snapshot.isHost && snapshot.me?.state === "approved" && snapshot.room.state === "active";
 }
 
 function revisionOnlyActivity(left: Room, right: Room) {
@@ -117,10 +123,21 @@ export function RoomView({
   // Only the server snapshot advances the cursor. A missed Realtime event can
   // still arrive in the next snapshot, even if later opinions are on screen.
   const data = useMemo(() => {
+    if (!snapshot) return snapshot;
+    const canShowLive = snapshot.isHost
+      ? snapshot.canHeartbeat && snapshot.room.state === "active"
+      : canPreviewPeerOpinions(snapshot);
+    let additions: Message[] = [];
+    if (canShowLive && liveOpinions.length) {
+      const known = new Set(snapshot.messages.map((message) => message.id));
+      additions = liveOpinions.filter((message) =>
+        message.room_id === snapshot.room.id && message.round_number === snapshot.room.round_number && !known.has(message.id),
+      );
+    }
     const own = ownAcknowledgement?.message;
-    if (snapshot && ownAcknowledgement && !snapshot.isHost && own?.room_id === snapshot.room.id &&
+    if (ownAcknowledgement && !snapshot.isHost && own?.room_id === snapshot.room.id &&
         own.member_id === snapshot.me?.id && own.round_number === snapshot.room.round_number) {
-      const messages = snapshot.messages.filter((message) => message.id !== own.id);
+      const messages = [...snapshot.messages, ...additions].filter((message) => message.id !== own.id);
       if (!ownAcknowledgement.invalidated && own.visibility === "visible") messages.push(own);
       return {
         ...snapshot,
@@ -129,13 +146,6 @@ export function RoomView({
         myRoundMessage: ownAcknowledgement.invalidated || own.visibility === "hidden" ? null : own,
       };
     }
-    if (!snapshot?.isHost || !snapshot.canHeartbeat ||
-        snapshot.room.state !== "active" || !liveOpinions.length)
-      return snapshot;
-    const known = new Set(snapshot.messages.map((message) => message.id));
-    const additions = liveOpinions.filter(
-      (message) => message.round_number === snapshot.room.round_number && !known.has(message.id),
-    );
     if (!additions.length) return snapshot;
     return {
       ...snapshot,
@@ -147,6 +157,7 @@ export function RoomView({
   const refreshAgain = useRef(false);
   const cancelScheduledRefresh = useRef<(() => void) | null>(null);
   const scheduleOwnRefresh = useRef<(() => void) | null>(null);
+  const previewAfterOwnSave = useRef<(() => void) | null>(null);
   const [error, setError] = useState("");
   const [sendError, setSendError] = useState("");
   const [info, setInfo] = useState("");
@@ -275,8 +286,11 @@ export function RoomView({
             saveOwnAcknowledgement(null);
           setLiveOpinions((current) => {
             if (!current.length) return current;
-            if (!result.isHost || !result.canHeartbeat || !previous ||
-                !sameOpinionRound(previous.room, result.room))
+            if (!previous || previous.isHost !== result.isHost ||
+                (result.isHost
+                  ? !result.canHeartbeat || !sameOpinionRound(previous.room, result.room)
+                  : !canPreviewPeerOpinions(result) || previous.me?.id !== result.me.id ||
+                    !sameRealtimeScope(previous.room, result.room)))
               return [];
             const received = new Set(result.messages.map((message) => message.id));
             return current.filter((message) => !received.has(message.id));
@@ -319,6 +333,8 @@ export function RoomView({
     // Spread each classroom burst across clients while bounding the wait.
     const quietWindow = participant ? 150 + Math.random() * 150 : 500;
     const maxBackgroundWait = participant ? 450 + Math.random() * 150 : 1200;
+    const reconcileQuietWindow = 800 + Math.random() * 200;
+    const maxReconcileWait = 1800 + Math.random() * 300;
     let disposed = false;
     let subscribed = false;
     let channel: RealtimeChannel | undefined;
@@ -359,7 +375,10 @@ export function RoomView({
       cancelScheduled();
       if (!disposed) void refresh();
     };
-    const scheduleRefresh = (priority: "background" | "urgent" | "own" = "urgent") => {
+    const scheduleRefresh = (
+      priority: "background" | "urgent" | "own" | "reconcile" = "urgent",
+      reconcileRevision?: number,
+    ) => {
       if (disposed || urgentQueued) return;
       const now = Date.now();
       if (priority === "urgent") {
@@ -376,12 +395,139 @@ export function RoomView({
         timeout = setTimeout(flush, ownDeadline - now);
         return;
       }
-      backgroundDeadline ??= now + maxBackgroundWait;
+      const reconcile = priority === "reconcile";
+      backgroundDeadline = Math.min(backgroundDeadline ?? Infinity,
+        now + (reconcile ? maxReconcileWait : maxBackgroundWait));
       clearTimeout(timeout);
-      const due = Math.min(now + quietWindow, backgroundDeadline, ownDeadline ?? Infinity);
-      timeout = setTimeout(flush, Math.max(0, due - now));
+      const due = Math.min(now + (reconcile ? reconcileQuietWindow : quietWindow),
+        backgroundDeadline, ownDeadline ?? Infinity);
+      timeout = setTimeout(() => {
+        if (reconcileRevision === undefined || ownDeadline !== undefined) {
+          flush();
+          return;
+        }
+        cancelScheduled();
+        const reconcileLatest = async () => {
+          await refreshInFlight.current;
+          const current = snapshotRef.current?.room;
+          if (!disposed && current?.id === roomId && current.revision < reconcileRevision)
+            void refresh();
+        };
+        void reconcileLatest();
+      }, Math.max(0, due - now));
     };
     scheduleOwnRefresh.current = () => scheduleRefresh("own");
+
+    let previewTimer: ReturnType<typeof setTimeout> | undefined;
+    let previewRead: AbortController | undefined;
+    let wantedRevision = -1;
+    let readRevision = -1;
+    let ownSaveQueued = false;
+    let accessInvalidated = false;
+    const clearParticipantPreview = () => {
+      if (!participant) return;
+      clearTimeout(previewTimer);
+      previewTimer = undefined;
+      wantedRevision = -1;
+      readRevision = -1;
+      ownSaveQueued = false;
+      previewRead?.abort();
+      previewRead = undefined;
+      setLiveOpinions((opinions) => opinions.length ? [] : opinions);
+    };
+    const scheduleParticipantPreview = () => {
+      const pending = ownSaveQueued || (subscribed && wantedRevision > readRevision);
+      if (disposed || !pending || !canPoll() || accessInvalidated ||
+          previewTimer !== undefined || previewRead) return;
+      previewTimer = setTimeout(() => {
+        previewTimer = undefined;
+        void readParticipantPreview();
+      }, 40 + Math.random() * 60);
+    };
+    const readParticipantPreview = async () => {
+      const afterOwnSave = ownSaveQueued;
+      ownSaveQueued = false;
+      const base = snapshotRef.current;
+      const observed = realtimeRoom.current;
+      if (!canPreviewPeerOpinions(base) || base.room.id !== roomId ||
+          (observed && !sameRealtimeScope(base.room, observed))) {
+        scheduleRefresh();
+        return;
+      }
+      const targetRevision = wantedRevision;
+      if (!afterOwnSave && targetRevision <= base.room.revision) {
+        readRevision = base.room.revision;
+        return;
+      }
+      readRevision = Math.max(readRevision, targetRevision);
+      const cursor = base.messages.at(-1)?.id ?? 0;
+      const controller = new AbortController();
+      previewRead = controller;
+      const deadline = setTimeout(() => controller.abort(), 1100);
+      try {
+        // The embedded read returns the room and its visible opinions from one
+        // statement. Both tables still enforce Supabase RLS for this session.
+        const { data: response, error } = await client.from("rooms")
+          .select("id,revision,state,messages_epoch,round_number,round_open,speaker_ids,messages(id,room_id,role,member_id,nickname,avatar,content,stance,visibility,round_number,created_at,edited_at,edit_client_id)")
+          .eq("id", roomId).eq("state", "active")
+          .eq("messages.role", "member").eq("messages.visibility", "visible")
+          .eq("messages.round_number", base.room.round_number).neq("messages.member_id", base.me.id)
+          .gt("messages.id", cursor).order("id", { referencedTable: "messages" })
+          .limit(30, { referencedTable: "messages" }).abortSignal(controller.signal).maybeSingle();
+        if (disposed || previewRead !== controller) return;
+        const current = snapshotRef.current;
+        if (error || controller.signal.aborted) {
+          if ((current?.room.revision ?? -1) < targetRevision) scheduleRefresh("background");
+          return;
+        }
+        const result = response as ParticipantOpinionRead | null;
+        const latest = realtimeRoom.current;
+        if (!result || !canPreviewPeerOpinions(current) || current.me.id !== base.me.id ||
+            !sameRealtimeScope(result, base.room) || !sameRealtimeScope(result, current.room) ||
+            (latest && !sameRealtimeScope(result, latest))) {
+          clearParticipantPreview();
+          scheduleRefresh();
+          return;
+        }
+        if (result.revision < current.room.revision) {
+          readRevision = Math.max(readRevision, current.room.revision);
+          return;
+        }
+        if (!Number.isSafeInteger(result.revision) || result.revision < targetRevision || !Array.isArray(result.messages)) {
+          scheduleRefresh("background");
+          return;
+        }
+        readRevision = Math.max(readRevision, result.revision);
+        const known = new Set(current.messages.map((message) => message.id));
+        const additions = result.messages.filter((message) =>
+          message.room_id === roomId && message.round_number === result.round_number &&
+          message.role === "member" && message.visibility === "visible" && !!message.member_id &&
+          message.member_id !== current.me.id && Number.isSafeInteger(message.id) &&
+          message.id > cursor && !known.has(message.id),
+        );
+        if (additions.length) setLiveOpinions((opinions) => {
+          const merged = new Map(opinions.map((message) => [message.id, message]));
+          for (const message of additions) merged.set(message.id, message);
+          return [...merged.values()];
+        });
+        if (result.revision > current.room.revision) scheduleRefresh("reconcile", result.revision);
+      } catch {
+        if (!disposed && previewRead === controller) scheduleRefresh("background");
+      } finally {
+        clearTimeout(deadline);
+        if (previewRead === controller) {
+          previewRead = undefined;
+          scheduleParticipantPreview();
+        }
+      }
+    };
+    if (participant) previewAfterOwnSave.current = () => {
+      // The save already committed. Check for peers without waiting for the WAL
+      // notification, then let later revisions cover peers that save afterward.
+      ownSaveQueued = true;
+      scheduleParticipantPreview();
+    };
+
     const subscribe = async () => {
       if (!realtimeRole) return;
       const { data: { session } } = await client.auth.getSession();
@@ -406,14 +552,22 @@ export function RoomView({
               realtimeRoom.current = changedRoom;
               if (current && !sameRealtimeScope(changedRoom, current)) {
                 invalidateOwnAcknowledgement();
-                setLiveOpinions((opinions) => opinions.length ? [] : opinions);
+                if (participant) clearParticipantPreview();
+                else setLiveOpinions((opinions) => opinions.length ? [] : opinions);
               }
             }
             // A heartbeat updates host_seen_at without changing the displayed room.
             if (eventType === "UPDATE" && current?.id === roomId && sameRoomVersion(changedRoom, current))
               return;
-            scheduleRefresh(eventType === "UPDATE" && current && revisionOnlyActivity(changedRoom, current)
-              ? "background" : "urgent");
+            const background = eventType === "UPDATE" && current && revisionOnlyActivity(changedRoom, current);
+            if (background && participant && canPreviewPeerOpinions(snapshotRef.current) &&
+                subscribed && canPoll() && !accessInvalidated) {
+              wantedRevision = Math.max(wantedRevision, changedRoom.revision);
+              scheduleParticipantPreview();
+            } else {
+              if (!background) clearParticipantPreview();
+              scheduleRefresh(background ? "background" : "urgent");
+            }
           },
         )
         .on(
@@ -421,8 +575,11 @@ export function RoomView({
           { event: "*", schema: "public", table: "members", filter: `room_id=eq.${roomId}` },
           ({ new: member, old: previous }: RealtimePostgresChangesPayload<Snapshot["members"][number]>) => {
             if (("id" in member && member.id === snapshotRef.current?.me?.id) ||
-                ("id" in previous && previous.id === snapshotRef.current?.me?.id))
+                ("id" in previous && previous.id === snapshotRef.current?.me?.id)) {
               invalidateOwnAcknowledgement();
+              clearParticipantPreview();
+              accessInvalidated = !("state" in member && member.state === "approved");
+            }
             scheduleRefresh("urgent");
           },
         );
@@ -474,7 +631,8 @@ export function RoomView({
         );
       roomChannel.subscribe((status: string) => {
         if (disposed) return;
-        setLiveOpinions((opinions) => opinions.length ? [] : opinions);
+        if (participant) clearParticipantPreview();
+        else setLiveOpinions((opinions) => opinions.length ? [] : opinions);
         const ready = status === "SUBSCRIBED";
         if (ready !== subscribed) {
           subscribed = ready;
@@ -486,12 +644,15 @@ export function RoomView({
     void subscribe().catch(() => {});
     return () => {
       disposed = true;
+      clearTimeout(previewTimer);
+      previewRead?.abort();
       clearTimeout(pollTimer);
       window.removeEventListener("online", catchUp);
       document.removeEventListener("visibilitychange", catchUp);
       cancelScheduled();
       if (cancelScheduledRefresh.current === cancelScheduled) cancelScheduledRefresh.current = null;
       scheduleOwnRefresh.current = null;
+      previewAfterOwnSave.current = null;
       if (channel) void client.removeChannel(channel);
     };
   }, [refresh, roomId, demo, adminView, realtimeRole, invalidateOwnAcknowledgement]);
@@ -904,6 +1065,7 @@ export function RoomView({
           const invalidated = sendingScope !== ownScopeGeneration.current ||
             (!!observed && !sameRealtimeScope(observed, data.room));
           saveOwnAcknowledgement({ message: result, refreshId: refreshId.current, invalidated });
+          if (!invalidated && result.visibility === "visible") previewAfterOwnSave.current?.();
           if (invalidated || !scheduleOwnRefresh.current) void refresh();
           else scheduleOwnRefresh.current();
         } else if (isAiRequest) {

@@ -121,7 +121,7 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
     });
 
     await t.test(
-      "direct SELECT hides other members and rejects revoked sessions",
+      "direct SELECT limits peer opinions and rejects kicked members and revoked sessions",
       async () => {
         const host = crypto.randomUUID(),
           guest = crypto.randomUUID(),
@@ -158,6 +158,12 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
               [room, other, state],
             );
           }
+          await db.query(`
+            insert into public.messages(room_id,user_id,member_id,role,nickname,avatar,content,client_id,visibility,round_number)
+            select m.room_id,m.user_id,m.id,'member',m.nickname,m.avatar,v.visibility,gen_random_uuid(),v.visibility,v.round_number
+            from public.members m cross join (values ('visible',1),('held',2),('hidden',3)) as v(visibility,round_number)
+            where m.room_id=$1 and m.nickname='approved'
+          `, [room]);
           const claims = async (user: string, sid: string) =>
             db.query("select set_config('request.jwt.claims',$1,true)", [
               JSON.stringify({
@@ -175,6 +181,10 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
             own.rows.map((r) => r.nickname),
             ["self"],
           );
+          const peerOpinions = await db.query<{ content: string }>(
+            "select content from public.messages where room_id=$1 and role='member'", [room],
+          );
+          assert.deepEqual(peerOpinions.rows.map((message) => message.content), ["visible"]);
           await claims(host, hostSession);
           assert.equal(
             (await db.query("select * from public.members")).rows.length,
@@ -187,7 +197,13 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
             (await db.query("select * from public.rooms")).rows.length,
             1,
           );
+          await db.exec("reset role; update public.rooms set state='active'");
+          await db.query("update public.members set state='kicked' where user_id=$1", [guest]);
+          await db.exec("set local role authenticated");
+          assert.equal((await db.query("select id from public.rooms")).rows.length, 0);
+          assert.equal((await db.query("select id from public.messages")).rows.length, 0);
           await db.exec("reset role");
+          await db.query("update public.members set state='approved' where user_id=$1", [guest]);
           await db.query("delete from auth.sessions where id=$1", [session]);
           await db.exec("set local role authenticated");
           assert.equal(
@@ -198,6 +214,7 @@ test("PostgreSQL migrations and access/queue regressions", async (t) => {
             (await db.query("select * from public.members")).rows.length,
             0,
           );
+          assert.equal((await db.query("select id from public.messages")).rows.length, 0);
           await claims(guest, hostSession);
           assert.equal(
             (await db.query("select * from public.rooms")).rows.length,
