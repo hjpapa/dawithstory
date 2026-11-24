@@ -434,6 +434,9 @@ export function RoomView({
       previewRead?.abort();
       previewRead = undefined;
       setLiveOpinions((opinions) => opinions.length ? [] : opinions);
+      const confirmedMessages = snapshotRef.current?.messages;
+      setSelected((selection) => selection && !confirmedMessages?.some((message) => message.id === selection.message.id)
+        ? null : selection);
     };
     const scheduleParticipantPreview = () => {
       const pending = ownSaveQueued || (subscribed && wantedRevision > readRevision);
