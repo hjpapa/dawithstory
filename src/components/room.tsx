@@ -299,7 +299,8 @@ export function RoomView({
             if (!current) return null;
             const latest = result.messages?.find((message) => message.id === current.message.id);
             if (!latest) return result.isHost ? current : null;
-            return (latest.edit_client_id ?? null) === (current.message.edit_client_id ?? null)
+            return (latest.edited_at ?? null) === (current.message.edited_at ?? null) &&
+              (!current.message.edit_client_id || latest.edit_client_id === current.message.edit_client_id)
               ? current
               : null;
           });
@@ -333,8 +334,8 @@ export function RoomView({
     // Spread each classroom burst across clients while bounding the wait.
     const quietWindow = participant ? 150 + Math.random() * 150 : 500;
     const maxBackgroundWait = participant ? 450 + Math.random() * 150 : 1200;
-    const reconcileQuietWindow = 800 + Math.random() * 200;
-    const maxReconcileWait = 1800 + Math.random() * 300;
+    const reconcileQuietWindow = 2300 + Math.random() * 700;
+    const maxReconcileWait = 3500 + Math.random() * 500;
     let disposed = false;
     let subscribed = false;
     let channel: RealtimeChannel | undefined;
@@ -391,7 +392,7 @@ export function RoomView({
         // The sender already sees the saved opinion. Reconcile it later if
         // there is no earlier update queued, and let room activity pull it forward.
         if (timeout !== undefined) return;
-        ownDeadline = now + 800 + Math.random() * 400;
+        ownDeadline = now + (participant && subscribed ? reconcileQuietWindow : 800 + Math.random() * 400);
         timeout = setTimeout(flush, ownDeadline - now);
         return;
       }
@@ -424,6 +425,9 @@ export function RoomView({
     let readRevision = -1;
     let ownSaveQueued = false;
     let accessInvalidated = false;
+    let lastPreviewStart = 0;
+    let previousPreviewStart = 0;
+    let previewRetryAfter = 0;
     const clearParticipantPreview = () => {
       if (!participant) return;
       clearTimeout(previewTimer);
@@ -442,10 +446,13 @@ export function RoomView({
       const pending = ownSaveQueued || (subscribed && wantedRevision > readRevision);
       if (disposed || !pending || !canPoll() || accessInvalidated ||
           previewTimer !== undefined || previewRead) return;
+      // A classroom burst can emit one revision per sender. Allow two
+      // incremental reads per four seconds and coalesce the rest.
+      const earliest = Math.max(lastPreviewStart + 550, previousPreviewStart + 4000, previewRetryAfter);
       previewTimer = setTimeout(() => {
         previewTimer = undefined;
         void readParticipantPreview();
-      }, 40 + Math.random() * 60);
+      }, Math.max(0, earliest - Date.now()) + 40 + Math.random() * 100);
     };
     const readParticipantPreview = async () => {
       const afterOwnSave = ownSaveQueued;
@@ -464,23 +471,27 @@ export function RoomView({
       }
       readRevision = Math.max(readRevision, targetRevision);
       const cursor = base.messages.at(-1)?.id ?? 0;
+      previousPreviewStart = lastPreviewStart;
+      lastPreviewStart = Date.now();
       const controller = new AbortController();
       previewRead = controller;
-      const deadline = setTimeout(() => controller.abort(), 1100);
+      const deadline = setTimeout(() => controller.abort(), 3200);
       try {
-        // The embedded read returns the room and its visible opinions from one
-        // statement. Both tables still enforce Supabase RLS for this session.
-        const { data: response, error } = await client.from("rooms")
-          .select("id,revision,state,messages_epoch,round_number,round_open,speaker_ids,messages(id,room_id,role,member_id,nickname,avatar,content,stance,visibility,round_number,created_at,edited_at,edit_client_id)")
-          .eq("id", roomId).eq("state", "active")
-          .eq("messages.role", "member").eq("messages.visibility", "visible")
-          .eq("messages.round_number", base.room.round_number).neq("messages.member_id", base.me.id)
-          .gt("messages.id", cursor).order("id", { referencedTable: "messages" })
-          .limit(30, { referencedTable: "messages" }).abortSignal(controller.signal).maybeSingle();
+        // The RPC checks the caller's current session and room membership once
+        // and reads only visible peer opinions in the same database snapshot.
+        const { data: response, error } = await client.rpc("story_peer_opinions", {
+          p_room: roomId, p_after: cursor,
+        }).abortSignal(controller.signal);
         if (disposed || previewRead !== controller) return;
         const current = snapshotRef.current;
         if (error || controller.signal.aborted) {
-          if ((current?.room.revision ?? -1) < targetRevision) scheduleRefresh("background");
+          previewRetryAfter = Date.now() + 4000;
+          if (error?.code === "42501") {
+            clearParticipantPreview();
+            scheduleRefresh();
+          } else {
+            scheduleRefresh("background");
+          }
           return;
         }
         const result = response as ParticipantOpinionRead | null;
@@ -515,7 +526,10 @@ export function RoomView({
         });
         if (result.revision > current.room.revision) scheduleRefresh("reconcile", result.revision);
       } catch {
-        if (!disposed && previewRead === controller) scheduleRefresh("background");
+        if (!disposed && previewRead === controller) {
+          previewRetryAfter = Date.now() + 4000;
+          scheduleRefresh("background");
+        }
       } finally {
         clearTimeout(deadline);
         if (previewRead === controller) {

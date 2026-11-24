@@ -3,6 +3,16 @@ import { readFile } from "node:fs/promises";
 import type { PGlite } from "@electric-sql/pglite";
 
 type Batch = { room: Record<string, unknown>; messages: Record<string, unknown>[] };
+type PeerDelta = {
+  id: string;
+  revision: number;
+  state: string;
+  messages_epoch: number;
+  round_number: number;
+  round_open: boolean;
+  speaker_ids: string[] | null;
+  messages: Record<string, unknown>[];
+};
 type Context = {
   room: Record<string, unknown>;
   isHost: boolean;
@@ -101,6 +111,85 @@ export async function testTeacherOpinionBatch(db: PGlite) {
     await rejects(db,() => query(), /Forbidden/);
     await db.exec("reset role; set local role anon");
     await rejects(db,() => query(), /permission denied/);
+  } finally {
+    await db.exec("reset role; rollback");
+  }
+}
+
+export async function testPeerOpinionDelta(db: PGlite) {
+  await db.exec("begin");
+  try {
+    const f = await fixture(db);
+    const peer = await db.query<{ id: string; user_id: string }>(`
+      with users as (insert into auth.users(id) values (gen_random_uuid()), (gen_random_uuid()), (gen_random_uuid()) returning id)
+      insert into public.members(room_id,user_id,nickname,state)
+      select $1,id,id::text::varchar(16),'approved' from users returning id,user_id
+    `, [f.room]);
+    const [visible, held, hidden] = peer.rows;
+    const ids = (await db.query<{ id: number }>(`
+      insert into public.messages(room_id,user_id,member_id,role,nickname,content,round_number,visibility,safety_reason,edit_client_id,edited_at) values
+      ($1,$2,$3,'member','visible','visible opinions',2,'visible','private reason',gen_random_uuid(),now()),
+      ($1,$4,$5,'member','held','held opinions',2,'held','private reason',null,null),
+      ($1,$6,$7,'member','hidden','hidden opinions',2,'hidden',null,null,null),
+      ($1,$2,$3,'member','older','older opinion',1,'visible',null,null,null),
+      ($1,$8,$9,'member','self','own opinion',2,'visible',null,null,null),
+      ($1,null,null,'host','teacher','teacher opinion',2,'visible',null,null,null),
+      ($1,null,null,'ai','AI','AI opinion',2,'visible',null,null,null),
+      ($1,null,null,'member','removed','missing member',2,'visible',null,null,null),
+      ($10,$2,$3,'member','other','different room',2,'visible',null,null,null)
+      returning id
+    `, [f.room,visible.user_id,visible.id,held.user_id,held.id,hidden.user_id,hidden.id,f.student,f.member,f.otherRoom])).rows.map((row) => row.id);
+    await db.query("update public.rooms set revision=13,messages_epoch=7,speaker_ids=$2 where id=$1", [f.room,[f.member]]);
+    const query = (room = f.room, after: number | null = 0) => db.query<{ value: PeerDelta | null }>(
+      "select public.story_peer_opinions($1,$2) as value", [room,after],
+    );
+    await claims(db,f.student,f.studentSession);
+    await db.exec("set local role authenticated");
+    const { messages, ...room } = (await query()).rows[0].value!;
+    assert.deepEqual(room, { id:f.room,revision:13,state:"active",messages_epoch:7,round_number:2,round_open:true,speaker_ids:[f.member] });
+    assert.deepEqual(messages.map((message) => message.id), [ids[0]]);
+    assert.deepEqual(Object.keys(messages[0]).sort(), [
+      "id", "room_id", "role", "member_id", "nickname", "avatar", "content", "stance", "visibility", "round_number", "created_at", "edited_at",
+    ].sort());
+    assert.ok(messages[0].edited_at);
+    assert.deepEqual((await query(f.room,ids[0])).rows[0].value?.messages, []);
+    assert.equal((await query(f.otherRoom)).rows[0].value, null);
+    assert.equal((await query(crypto.randomUUID())).rows[0].value, null);
+    for (const after of [-1,null]) await rejects(db, () => query(f.room,after), /Invalid opinion cursor/);
+    for (const [user,session] of [[f.host,f.hostSession],[f.otherHost,f.otherSession],[f.student,f.hostSession],[f.student,undefined],[undefined,undefined]]) {
+      await claims(db,user,session);
+      assert.equal((await query()).rows[0].value, null);
+    }
+
+    await claims(db,f.student,f.studentSession);
+    await db.exec("reset role");
+    for (const state of ["waiting","rejected","kicked"]) {
+      await db.query("update public.members set state=$2 where id=$1", [f.member,state]);
+      await db.exec("set local role authenticated");
+      assert.equal((await query()).rows[0].value, null);
+      await db.exec("reset role");
+    }
+    await db.query("update public.members set state='approved' where id=$1", [f.member]);
+    for (const state of ["paused","ended"]) {
+      await db.query("update public.rooms set state=$2 where id=$1", [f.room,state]);
+      await db.exec("set local role authenticated");
+      assert.equal((await query()).rows[0].value, null);
+      await db.exec("reset role");
+    }
+    await db.query("update public.rooms set state='active',revision=14,round_number=3,messages_epoch=8 where id=$1", [f.room]);
+    await db.exec("set local role authenticated");
+    const next = (await query()).rows[0].value!;
+    assert.equal(next.round_number,3);
+    assert.equal(next.messages_epoch,8);
+    assert.deepEqual(next.messages, []);
+    await db.exec("reset role");
+    await db.query("delete from auth.sessions where id=$1", [f.studentSession]);
+    await db.exec("set local role authenticated");
+    assert.equal((await query()).rows[0].value, null);
+    for (const role of ["anon","service_role"]) {
+      await db.exec(`reset role; set local role ${role}`);
+      await rejects(db, () => query(), /permission denied/);
+    }
   } finally {
     await db.exec("reset role; rollback");
   }
